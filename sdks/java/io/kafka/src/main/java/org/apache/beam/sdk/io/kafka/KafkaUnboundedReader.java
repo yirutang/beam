@@ -20,7 +20,6 @@ package org.apache.beam.sdk.io.kafka;
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -86,19 +85,10 @@ class KafkaUnboundedReader<K, V> extends UnboundedReader<KafkaRecord<K, V>> {
     consumer = spec.getConsumerFactoryFn().apply(spec.getConsumerConfig());
     consumerSpEL.evaluateAssign(consumer, spec.getTopicPartitions());
 
-    try {
-      keyDeserializerInstance = spec.getKeyDeserializer().getDeclaredConstructor().newInstance();
-      valueDeserializerInstance =
-          spec.getValueDeserializer().getDeclaredConstructor().newInstance();
-    } catch (InstantiationException
-        | IllegalAccessException
-        | InvocationTargetException
-        | NoSuchMethodException e) {
-      throw new IOException("Could not instantiate deserializers", e);
-    }
-
-    keyDeserializerInstance.configure(spec.getConsumerConfig(), true);
-    valueDeserializerInstance.configure(spec.getConsumerConfig(), false);
+    keyDeserializerInstance =
+        spec.getKeyDeserializerProvider().getDeserializer(spec.getConsumerConfig(), true);
+    valueDeserializerInstance =
+        spec.getValueDeserializerProvider().getDeserializer(spec.getConsumerConfig(), false);
 
     // Seek to start offset for each partition. This is the first interaction with the server.
     // Unfortunately it can block forever in case of network issues like incorrect ACLs.

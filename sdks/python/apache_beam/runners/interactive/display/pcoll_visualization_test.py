@@ -16,10 +16,11 @@
 #
 
 """Tests for apache_beam.runners.interactive.display.pcoll_visualization."""
+# pytype: skip-file
+
 from __future__ import absolute_import
 
 import sys
-import time
 import unittest
 
 import apache_beam as beam
@@ -32,9 +33,9 @@ from apache_beam.runners.interactive.display import pcoll_visualization as pv
 # TODO(BEAM-8288): clean up the work-around of nose tests using Python2 without
 # unittest.mock module.
 try:
-  from unittest.mock import patch
+  from unittest.mock import patch, ANY
 except ImportError:
-  from mock import patch
+  from mock import patch, ANY
 
 try:
   import timeloop
@@ -42,12 +43,12 @@ except ImportError:
   pass
 
 
-@unittest.skipIf(not ie.current_env().is_interactive_ready,
-                 '[interactive] dependency is not installed.')
-@unittest.skipIf(sys.version_info < (3, 6),
-                 'The tests require at least Python 3.6 to work.')
+@unittest.skipIf(
+    not ie.current_env().is_interactive_ready,
+    '[interactive] dependency is not installed.')
+@unittest.skipIf(
+    sys.version_info < (3, 6), 'The tests require at least Python 3.6 to work.')
 class PCollectionVisualizationTest(unittest.TestCase):
-
   def setUp(self):
     ie.new_env()
     # Allow unit test to run outside of ipython kernel since we don't test the
@@ -69,8 +70,8 @@ class PCollectionVisualizationTest(unittest.TestCase):
 
     with self.assertRaises(AssertionError) as ctx:
       pv.PCollectionVisualization(Foo())
-      self.assertTrue('pcoll should be apache_beam.pvalue.PCollection' in
-                      ctx.exception)
+      self.assertTrue(
+          'pcoll should be apache_beam.pvalue.PCollection' in ctx.exception)
 
   def test_pcoll_visualization_generate_unique_display_id(self):
     pv_1 = pv.PCollectionVisualization(self._pcoll)
@@ -87,53 +88,52 @@ class PCollectionVisualizationTest(unittest.TestCase):
     self.assertIsInstance(h, timeloop.Timeloop)
     h.stop()
 
-  @patch('apache_beam.runners.interactive.display.pcoll_visualization'
-         '.PCollectionVisualization.display_facets')
-  def test_dynamic_plotting_update_same_display(self,
-                                                mocked_display_facets):
-    fake_pipeline_result = runner.PipelineResult(runner.PipelineState.RUNNING)
-    ie.current_env().set_pipeline_result(self._p, fake_pipeline_result)
-    # Starts async dynamic plotting that never ends in this test.
-    h = pv.visualize(self._pcoll, dynamic_plotting_interval=0.001)
-    # Blocking so the above async task can execute some iterations.
-    time.sleep(1)
-    # The first iteration doesn't provide updating_pv to display_facets.
-    _, first_kwargs = mocked_display_facets.call_args_list[0]
-    self.assertEqual(first_kwargs, {})
-    # The following iterations use the same updating_pv to display_facets and so
-    # on.
-    _, second_kwargs = mocked_display_facets.call_args_list[1]
-    updating_pv = second_kwargs['updating_pv']
-    for call in mocked_display_facets.call_args_list[2:]:
-      _, kwargs = call
-      self.assertIs(kwargs['updating_pv'], updating_pv)
-    h.stop()
-
-  @patch('timeloop.Timeloop.stop')
-  def test_auto_stop_dynamic_plotting_when_job_is_terminated(
+  @patch(
+      'apache_beam.runners.interactive.display.pcoll_visualization'
+      '.PCollectionVisualization._display_dive')
+  @patch(
+      'apache_beam.runners.interactive.display.pcoll_visualization'
+      '.PCollectionVisualization._display_overview')
+  @patch(
+      'apache_beam.runners.interactive.display.pcoll_visualization'
+      '.PCollectionVisualization._display_dataframe')
+  def test_dynamic_plotting_updates_same_display(
       self,
-      mocked_timeloop):
+      mocked_display_dataframe,
+      mocked_display_overview,
+      mocked_display_dive):
+    original_pcollection_visualization = pv.PCollectionVisualization(
+        self._pcoll)
+    # Dynamic plotting always creates a new PCollectionVisualization.
+    new_pcollection_visualization = pv.PCollectionVisualization(self._pcoll)
+    # The display uses ANY data the moment display is invoked, and updates
+    # web elements with ids fetched from the given updating_pv.
+    new_pcollection_visualization.display_facets(
+        updating_pv=original_pcollection_visualization)
+    mocked_display_dataframe.assert_called_once_with(
+        ANY, original_pcollection_visualization._df_display_id)
+    mocked_display_overview.assert_called_once_with(
+        ANY, original_pcollection_visualization._overview_display_id)
+    mocked_display_dive.assert_called_once_with(
+        ANY, original_pcollection_visualization._dive_display_id)
+
+  def test_auto_stop_dynamic_plotting_when_job_is_terminated(self):
     fake_pipeline_result = runner.PipelineResult(runner.PipelineState.RUNNING)
     ie.current_env().set_pipeline_result(self._p, fake_pipeline_result)
-    # Starts non-stopping async dynamic plotting until the job is terminated.
-    pv.visualize(self._pcoll, dynamic_plotting_interval=0.001)
-    # Blocking so the above async task can execute some iterations.
-    time.sleep(1)
-    mocked_timeloop.assert_not_called()
+    # When job is running, the dynamic plotting will not be stopped.
+    self.assertFalse(ie.current_env().is_terminated(self._p))
+
     fake_pipeline_result = runner.PipelineResult(runner.PipelineState.DONE)
     ie.current_env().set_pipeline_result(self._p, fake_pipeline_result)
-    # Blocking so the above async task can execute some iterations.
-    time.sleep(1)
-    # "assert_called" is new in Python 3.6.
-    mocked_timeloop.assert_called()
+    # When job is done, the dynamic plotting will be stopped.
+    self.assertTrue(ie.current_env().is_terminated(self._p))
 
-  @patch('pandas.DataFrame.sample')
-  def test_display_plain_text_when_kernel_has_no_frontend(self,
-                                                          _mocked_sample):
+  @patch('pandas.DataFrame.head')
+  def test_display_plain_text_when_kernel_has_no_frontend(self, _mocked_head):
     # Resets the notebook check to False.
     ie.current_env()._is_in_notebook = False
     self.assertIsNone(pv.visualize(self._pcoll))
-    _mocked_sample.assert_called_once()
+    _mocked_head.assert_called_once()
 
 
 if __name__ == '__main__':

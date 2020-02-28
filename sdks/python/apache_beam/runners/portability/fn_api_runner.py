@@ -17,6 +17,8 @@
 
 """A PipelineRunner using the SDK harness.
 """
+# pytype: skip-file
+
 from __future__ import absolute_import
 from __future__ import print_function
 
@@ -31,7 +33,6 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from builtins import object
 from typing import TYPE_CHECKING
 from typing import Any
@@ -48,8 +49,10 @@ from typing import Tuple
 from typing import Type
 from typing import TypeVar
 from typing import Union
+from typing import overload
 
 import grpc
+from typing_extensions import Protocol
 
 import apache_beam as beam  # pylint: disable=ungrouped-imports
 from apache_beam import coders
@@ -103,16 +106,18 @@ if TYPE_CHECKING:
   from apache_beam.transforms.window import BoundedWindow
 
 T = TypeVar('T')
-ConstructorFn = Callable[
-    [Union['message.Message', bytes],
-     'FnApiRunner.StateServicer',
-     Optional['ExtendedProvisionInfo'],
-     'GrpcServer'],
-    'WorkerHandler']
+ConstructorFn = Callable[[
+    Union['message.Message', bytes],
+    'FnApiRunner.StateServicer',
+    Optional['ExtendedProvisionInfo'],
+    'GrpcServer'
+],
+                         'WorkerHandler']
 DataSideInput = Dict[Tuple[str, str],
                      Tuple[bytes, beam_runner_api_pb2.FunctionSpec]]
 DataOutput = Dict[str, bytes]
-BundleProcessResult = Tuple[beam_fn_api_pb2.InstructionResponse, List[beam_fn_api_pb2.ProcessBundleSplitResponse]]
+BundleProcessResult = Tuple[beam_fn_api_pb2.InstructionResponse,
+                            List[beam_fn_api_pb2.ProcessBundleSplitResponse]]
 
 # This module is experimental. No backwards-compatibility guarantees.
 
@@ -126,6 +131,9 @@ ENCODED_IMPULSE_VALUE = beam.coders.WindowedValueCoder(
 # The cache is disabled in production for other runners.
 STATE_CACHE_SIZE = 100
 
+# Time-based flush is enabled in the fn_api_runner by default.
+DATA_BUFFER_TIME_LIMIT_MS = 1000
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -135,7 +143,8 @@ class ControlConnection(object):
   _lock = threading.Lock()
 
   def __init__(self):
-    self._push_queue = queue.Queue()  # type: queue.Queue[beam_fn_api_pb2.InstructionRequest]
+    self._push_queue = queue.Queue(
+    )  # type: queue.Queue[beam_fn_api_pb2.InstructionRequest]
     self._input = None  # type: Optional[Iterable[beam_fn_api_pb2.InstructionResponse]]
     self._futures_by_id = dict()  # type: Dict[str, ControlFuture]
     self._read_thread = threading.Thread(
@@ -146,8 +155,17 @@ class ControlConnection(object):
     for data in self._input:
       self._futures_by_id.pop(data.instruction_id).set(data)
 
+  @overload
   def push(self, req):
-    # type: (...) -> Optional[ControlFuture]
+    # type: (BeamFnControlServicer.DoneMarker) -> None
+    pass
+
+  @overload
+  def push(self, req):
+    # type: (beam_fn_api_pb2.InstructionRequest) -> ControlFuture
+    pass
+
+  def push(self, req):
     if req == BeamFnControlServicer._DONE_MARKER:
       self._push_queue.put(req)
       return None
@@ -189,7 +207,10 @@ class BeamFnControlServicer(beam_fn_api_pb2_grpc.BeamFnControlServicer):
   STARTED_STATE = 'started'
   DONE_STATE = 'done'
 
-  _DONE_MARKER = object()
+  class DoneMarker(object):
+    pass
+
+  _DONE_MARKER = DoneMarker()
 
   def __init__(self):
     self._lock = threading.Lock()
@@ -200,7 +221,8 @@ class BeamFnControlServicer(beam_fn_api_pb2_grpc.BeamFnControlServicer):
     self._req_sent = collections.defaultdict(int)
     self._req_worker_mapping = {}
     self._log_req = logging.getLogger().getEffectiveLevel() <= logging.DEBUG
-    self._connections_by_worker_id = collections.defaultdict(ControlConnection)  # type: DefaultDict[str, ControlConnection]
+    self._connections_by_worker_id = collections.defaultdict(
+        ControlConnection)  # type: DefaultDict[str, ControlConnection]
 
   def get_conn_by_worker_id(self, worker_id):
     # type: (str) -> ControlConnection
@@ -220,8 +242,9 @@ class BeamFnControlServicer(beam_fn_api_pb2_grpc.BeamFnControlServicer):
 
     worker_id = dict(context.invocation_metadata()).get('worker_id')
     if not worker_id:
-      raise RuntimeError('All workers communicate through gRPC should have '
-                         'worker_id. Received None.')
+      raise RuntimeError(
+          'All workers communicate through gRPC should have '
+          'worker_id. Received None.')
 
     control_conn = self.get_conn_by_worker_id(worker_id)
     control_conn.set_input(iterator)
@@ -236,18 +259,77 @@ class BeamFnControlServicer(beam_fn_api_pb2_grpc.BeamFnControlServicer):
 
   def done(self):
     self._state = self.DONE_STATE
-    _LOGGER.debug('Runner: Requests sent by runner: %s',
-                  [(str(req), cnt) for req, cnt in self._req_sent.items()])
-    _LOGGER.debug('Runner: Requests multiplexing info: %s',
-                  [(str(req), worker) for req, worker
-                   in self._req_worker_mapping.items()])
+    _LOGGER.debug(
+        'Runner: Requests sent by runner: %s',
+        [(str(req), cnt) for req, cnt in self._req_sent.items()])
+    _LOGGER.debug(
+        'Runner: Requests multiplexing info: %s',
+        [(str(req), worker)
+         for req, worker in self._req_worker_mapping.items()])
 
 
-class _ListBuffer(list):
-  """Used to support parititioning of a list."""
+class Buffer(Protocol):
+  def __iter__(self):
+    # type: () -> Iterator[bytes]
+    pass
+
+  def append(self, item):
+    # type: (bytes) -> None
+    pass
+
+
+class PartitionableBuffer(Buffer, Protocol):
   def partition(self, n):
     # type: (int) -> List[List[bytes]]
-    return [self[k::n] for k in range(n)]
+    pass
+
+
+class _ListBuffer():
+  """Used to support parititioning of a list."""
+  def __init__(self, coder_impl):
+    self._coder_impl = coder_impl
+    self._inputs = []
+    self._grouped_output = None
+    self.cleared = False
+
+  def append(self, element):
+    if self.cleared:
+      raise RuntimeError('Trying to append to a cleared ListBuffer.')
+    if self._grouped_output:
+      raise RuntimeError('ListBuffer append after read.')
+    self._inputs.append(element)
+
+  def partition(self, n):
+    # type: (int) -> List[List[bytes]]
+    if self.cleared:
+      raise RuntimeError('Trying to partition a cleared ListBuffer.')
+    if len(self._inputs) >= n or len(self._inputs) == 0:
+      return [self._inputs[k::n] for k in range(n)]
+    else:
+      if not self._grouped_output:
+        output_stream_list = [create_OutputStream() for _ in range(n)]
+        idx = 0
+        for input in self._inputs:
+          input_stream = create_InputStream(input)
+          while input_stream.size() > 0:
+            decoded_value = self._coder_impl.decode_from_stream(
+                input_stream, True)
+            self._coder_impl.encode_to_stream(
+                decoded_value, output_stream_list[idx], True)
+            idx = (idx + 1) % n
+        self._grouped_output = [[output_stream.get()]
+                                for output_stream in output_stream_list]
+      return self._grouped_output
+
+  def __iter__(self):
+    if self.cleared:
+      raise RuntimeError('Trying to iterate through a cleared ListBuffer.')
+    return iter(self._inputs)
+
+  def clear(self):
+    self.cleared = True
+    self._inputs = []
+    self._grouped_output = None
 
 
 class _GroupingBuffer(object):
@@ -261,7 +343,8 @@ class _GroupingBuffer(object):
     self._key_coder = pre_grouped_coder.key_coder()
     self._pre_grouped_coder = pre_grouped_coder
     self._post_grouped_coder = post_grouped_coder
-    self._table = collections.defaultdict(list)  # type: Optional[DefaultDict[bytes, List[Any]]]
+    self._table = collections.defaultdict(
+        list)  # type: DefaultDict[bytes, List[Any]]
     self._windowing = windowing
     self._grouped_output = None  # type: Optional[List[List[bytes]]]
 
@@ -279,11 +362,12 @@ class _GroupingBuffer(object):
       windowed_key_value = coder_impl.decode_from_stream(input_stream, True)
       key, value = windowed_key_value.value
       self._table[key_coder_impl.encode(key)].append(
-          value if is_trivial_windowing
-          else windowed_key_value.with_value(value))
+          value if is_trivial_windowing else windowed_key_value.
+          with_value(value))
 
   def partition(self, n):
     # type: (int) -> List[List[bytes]]
+
     """ It is used to partition _GroupingBuffer to N parts. Once it is
     partitioned, it would not be re-partitioned with diff N. Re-partition
     is not supported now.
@@ -311,20 +395,19 @@ class _GroupingBuffer(object):
       coder_impl = self._post_grouped_coder.get_impl()
       key_coder_impl = self._key_coder.get_impl()
       self._grouped_output = [[] for _ in range(n)]
-      output_stream_list = []
-      for _ in range(n):
-        output_stream_list.append(create_OutputStream())
+      output_stream_list = [create_OutputStream() for _ in range(n)]
       for idx, (encoded_key, windowed_values) in enumerate(self._table.items()):
         key = key_coder_impl.decode(encoded_key)
         for wkvs in windowed_key_values(key, windowed_values):
           coder_impl.encode_to_stream(wkvs, output_stream_list[idx % n], True)
       for ix, output_stream in enumerate(output_stream_list):
         self._grouped_output[ix] = [output_stream.get()]
-      self._table = None
+      self._table.clear()
     return self._grouped_output
 
   def __iter__(self):
     # type: () -> Iterator[bytes]
+
     """ Since partition() returns a list of lists, add this __iter__ to return
     a list to simplify code when we need to iterate through ALL elements of
     _GroupingBuffer.
@@ -334,10 +417,11 @@ class _GroupingBuffer(object):
 
 class _WindowGroupingBuffer(object):
   """Used to partition windowed side inputs."""
-  def __init__(self,
-               access_pattern,
-               coder  # type: coders.WindowedValueCoder
-              ):
+  def __init__(
+      self,
+      access_pattern,
+      coder  # type: coders.WindowedValueCoder
+  ):
     # type: (...) -> None
     # Here's where we would use a different type of partitioning
     # (e.g. also by key) for a different access pattern.
@@ -348,21 +432,22 @@ class _WindowGroupingBuffer(object):
     elif access_pattern.urn == common_urns.side_inputs.MULTIMAP.urn:
       self._kv_extractor = lambda value: value
       self._key_coder = coder.wrapped_value_coder.key_coder()
-      self._value_coder = (
-          coder.wrapped_value_coder.value_coder())
+      self._value_coder = (coder.wrapped_value_coder.value_coder())
     else:
-      raise ValueError(
-          "Unknown access pattern: '%s'" % access_pattern.urn)
+      raise ValueError("Unknown access pattern: '%s'" % access_pattern.urn)
     self._windowed_value_coder = coder
     self._window_coder = coder.window_coder
-    self._values_by_window = collections.defaultdict(list)  # type: DefaultDict[Tuple[str, BoundedWindow], List[Any]]
+    self._values_by_window = collections.defaultdict(
+        list)  # type: DefaultDict[Tuple[str, BoundedWindow], List[Any]]
 
   def append(self, elements_data):
     # type: (bytes) -> None
     input_stream = create_InputStream(elements_data)
     while input_stream.size() > 0:
-      windowed_value = self._windowed_value_coder.get_impl(
-          ).decode_from_stream(input_stream, True)
+      windowed_val_coder_impl = self._windowed_value_coder.get_impl(
+      )  # type: WindowedValueCoderImpl
+      windowed_value = windowed_val_coder_impl.decode_from_stream(
+          input_stream, True)
       key, value = self._kv_extractor(windowed_value.value)
       for window in windowed_value.windows:
         self._values_by_window[key, window].append(value)
@@ -384,12 +469,13 @@ class FnApiRunner(runner.PipelineRunner):
 
   def __init__(
       self,
-      default_environment=None,  # type: Optional[beam_runner_api_pb2.Environment]
+      default_environment=None,  # type: Optional[environments.Environment]
       bundle_repeat=0,
       use_state_iterables=False,
       provision_info=None,  # type: Optional[ExtendedProvisionInfo]
       progress_request_frequency=None):
     # type: (...) -> None
+
     """Creates a new Fn API Runner.
 
     Args:
@@ -405,8 +491,7 @@ class FnApiRunner(runner.PipelineRunner):
     super(FnApiRunner, self).__init__()
     self._last_uid = -1
     self._default_environment = (
-        default_environment
-        or environments.EmbeddedPythonEnvironment())
+        default_environment or environments.EmbeddedPythonEnvironment())
     self._bundle_repeat = bundle_repeat
     self._num_workers = 1
     self._progress_frequency = progress_request_frequency
@@ -414,13 +499,18 @@ class FnApiRunner(runner.PipelineRunner):
     self._use_state_iterables = use_state_iterables
     self._provision_info = provision_info or ExtendedProvisionInfo(
         beam_provision_api_pb2.ProvisionInfo(
-            job_id='unknown-job-id',
-            job_name='unknown-job-name',
             retrieval_token='unused-retrieval-token'))
 
   def _next_uid(self):
     self._last_uid += 1
     return str(self._last_uid)
+
+  @staticmethod
+  def supported_requirements():
+    return (
+        common_urns.requirements.REQUIRES_STATEFUL_PROCESSING.urn,
+        common_urns.requirements.REQUIRES_BUNDLE_FINALIZATION.urn,
+    )
 
   def run_pipeline(self,
                    pipeline,  # type: Pipeline
@@ -430,8 +520,8 @@ class FnApiRunner(runner.PipelineRunner):
     RuntimeValueProvider.set_runtime_options({})
 
     # Setup "beam_fn_api" experiment options if lacked.
-    experiments = (options.view_as(pipeline_options.DebugOptions).experiments
-                   or [])
+    experiments = (
+        options.view_as(pipeline_options.DebugOptions).experiments or [])
     if not 'beam_fn_api' in experiments:
       experiments.append('beam_fn_api')
     options.view_as(pipeline_options.DebugOptions).experiments = experiments
@@ -446,15 +536,29 @@ class FnApiRunner(runner.PipelineRunner):
         pipeline_options.DirectOptions).direct_runner_bundle_repeat
     self._num_workers = options.view_as(
         pipeline_options.DirectOptions).direct_num_workers or self._num_workers
+
+    # set direct workers running mode if it is defined with pipeline options.
+    running_mode = \
+      options.view_as(pipeline_options.DirectOptions).direct_running_mode
+    if running_mode == 'multi_threading':
+      self._default_environment = environments.EmbeddedPythonGrpcEnvironment()
+    elif running_mode == 'multi_processing':
+      command_string = '%s -m apache_beam.runners.worker.sdk_worker_main' \
+                    % sys.executable
+      self._default_environment = environments.SubprocessSDKEnvironment(
+          command_string=command_string)
+
     self._profiler_factory = profiler.Profile.factory_from_options(
         options.view_as(pipeline_options.ProfilingOptions))
 
-    self._latest_run_result = self.run_via_runner_api(pipeline.to_runner_api(
-        default_environment=self._default_environment))
+    self._latest_run_result = self.run_via_runner_api(
+        pipeline.to_runner_api(default_environment=self._default_environment))
     return self._latest_run_result
 
   def run_via_runner_api(self, pipeline_proto):
     # type: (beam_runner_api_pb2.Pipeline) -> RunnerResult
+    self._validate_requirements(pipeline_proto)
+    self._check_requirements(pipeline_proto)
     stage_context, stages = self.create_stages(pipeline_proto)
     # TODO(pabloem, BEAM-7514): Create a watermark manager (that has access to
     #   the teststream (if any), and all the stages).
@@ -464,9 +568,9 @@ class FnApiRunner(runner.PipelineRunner):
   def maybe_profile(self):
     if self._profiler_factory:
       try:
-        profile_id = 'direct-' + subprocess.check_output(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
-        ).decode(errors='ignore').strip()
+        profile_id = 'direct-' + subprocess.check_output([
+            'git', 'rev-parse', '--abbrev-ref', 'HEAD'
+        ]).decode(errors='ignore').strip()
       except subprocess.CalledProcessError:
         profile_id = 'direct-unknown'
       profiler = self._profiler_factory(profile_id, time_prefix='')
@@ -484,13 +588,19 @@ class FnApiRunner(runner.PipelineRunner):
       print('CPU Profile written to %s' % path)
       try:
         import gprof2dot  # pylint: disable=unused-import
-        if not subprocess.call([
-            sys.executable, '-m', 'gprof2dot',
-            '-f', 'pstats', path, '-o', path + '.dot']):
+        if not subprocess.call([sys.executable,
+                                '-m',
+                                'gprof2dot',
+                                '-f',
+                                'pstats',
+                                path,
+                                '-o',
+                                path + '.dot']):
           if not subprocess.call(
               ['dot', '-Tsvg', '-o', path + '.svg', path + '.dot']):
-            print('CPU Profile rendering at file://%s.svg'
-                  % os.path.abspath(path))
+            print(
+                'CPU Profile rendering at file://%s.svg' %
+                os.path.abspath(path))
       except ImportError:
         # pylint: disable=superfluous-parens
         print('Please install gprof2dot and dot for profile renderings.')
@@ -499,27 +609,72 @@ class FnApiRunner(runner.PipelineRunner):
       # Empty context.
       yield
 
-  def create_stages(self,
-                    pipeline_proto  # type: beam_runner_api_pb2.Pipeline
-                   ):
+  def _validate_requirements(self, pipeline_proto):
+    """As a test runner, validate requirements were set correctly."""
+    expected_requirements = set()
+
+    def add_requirements(transform_id):
+      transform = pipeline_proto.components.transforms[transform_id]
+      if transform.spec.urn in fn_api_runner_transforms.PAR_DO_URNS:
+        payload = proto_utils.parse_Bytes(
+            transform.spec.payload, beam_runner_api_pb2.ParDoPayload)
+        if payload.requests_finalization:
+          expected_requirements.add(
+              common_urns.requirements.REQUIRES_BUNDLE_FINALIZATION.urn)
+        if (payload.state_specs or payload.timer_specs or
+            payload.timer_family_specs):
+          expected_requirements.add(
+              common_urns.requirements.REQUIRES_STATEFUL_PROCESSING.urn)
+        if payload.requires_stable_input:
+          expected_requirements.add(
+              common_urns.requirements.REQUIRES_STABLE_INPUT.urn)
+        if payload.requires_time_sorted_input:
+          expected_requirements.add(
+              common_urns.requirements.REQUIRES_TIME_SORTED_INPUT.urn)
+      else:
+        for sub in transform.subtransforms:
+          add_requirements(sub)
+
+    for root in pipeline_proto.root_transform_ids:
+      add_requirements(root)
+    if not expected_requirements.issubset(pipeline_proto.requirements):
+      raise ValueError(
+          'Missing requirement declaration: %s' %
+          (expected_requirements - set(pipeline_proto.requirements)))
+
+  def _check_requirements(self, pipeline_proto):
+    """Check that this runner can satisfy all pipeline requirements."""
+    supported_requirements = set(self.supported_requirements())
+    for requirement in pipeline_proto.requirements:
+      if requirement not in supported_requirements:
+        raise ValueError(
+            'Unable to run pipeline with requirement: %s' % requirement)
+
+  def create_stages(
+      self,
+      pipeline_proto  # type: beam_runner_api_pb2.Pipeline
+  ):
     # type: (...) -> Tuple[fn_api_runner_transforms.TransformContext, List[fn_api_runner_transforms.Stage]]
     return fn_api_runner_transforms.create_and_optimize_stages(
         copy.deepcopy(pipeline_proto),
-        phases=[fn_api_runner_transforms.annotate_downstream_side_inputs,
-                fn_api_runner_transforms.fix_side_input_pcoll_coders,
-                fn_api_runner_transforms.lift_combiners,
-                fn_api_runner_transforms.expand_sdf,
-                fn_api_runner_transforms.expand_gbk,
-                fn_api_runner_transforms.sink_flattens,
-                fn_api_runner_transforms.greedily_fuse,
-                fn_api_runner_transforms.read_to_impulse,
-                fn_api_runner_transforms.impulse_to_input,
-                fn_api_runner_transforms.inject_timer_pcollections,
-                fn_api_runner_transforms.sort_stages,
-                fn_api_runner_transforms.window_pcollection_coders],
+        phases=[
+            fn_api_runner_transforms.annotate_downstream_side_inputs,
+            fn_api_runner_transforms.fix_side_input_pcoll_coders,
+            fn_api_runner_transforms.lift_combiners,
+            fn_api_runner_transforms.expand_sdf,
+            fn_api_runner_transforms.expand_gbk,
+            fn_api_runner_transforms.sink_flattens,
+            fn_api_runner_transforms.greedily_fuse,
+            fn_api_runner_transforms.read_to_impulse,
+            fn_api_runner_transforms.impulse_to_input,
+            fn_api_runner_transforms.inject_timer_pcollections,
+            fn_api_runner_transforms.sort_stages,
+            fn_api_runner_transforms.window_pcollection_coders
+        ],
         known_runner_urns=frozenset([
             common_urns.primitives.FLATTEN.urn,
-            common_urns.primitives.GROUP_BY_KEY.urn]),
+            common_urns.primitives.GROUP_BY_KEY.urn
+        ]),
         use_state_iterables=self._use_state_iterables)
 
   def run_stages(self,
@@ -527,6 +682,7 @@ class FnApiRunner(runner.PipelineRunner):
                  stages  # type: List[fn_api_runner_transforms.Stage]
                 ):
     # type: (...) -> RunnerResult
+
     """Run a list of topologically-sorted stages in batch mode.
 
     Args:
@@ -540,7 +696,7 @@ class FnApiRunner(runner.PipelineRunner):
 
     try:
       with self.maybe_profile():
-        pcoll_buffers = collections.defaultdict(_ListBuffer)  # type: DefaultDict[bytes, _ListBuffer]
+        pcoll_buffers = {}
         for stage in stages:
           stage_results = self._run_stage(
               worker_handler_manager.get_worker_handlers,
@@ -561,13 +717,18 @@ class FnApiRunner(runner.PipelineRunner):
                                   context,  # type: pipeline_context.PipelineContext
                                   pipeline_components,  # type: beam_runner_api_pb2.Components
                                   data_side_input,  # type: DataSideInput
-                                  pcoll_buffers,  # type: Mapping[bytes, _ListBuffer]
-                                  safe_coders):
+                                  pcoll_buffers,  # type: Mapping[bytes, PartitionableBuffer]
+                                  safe_coders
+                                 ):
+    # type: (...) -> None
     for (transform_id, tag), (buffer_id, si) in data_side_input.items():
       _, pcoll_id = split_buffer_id(buffer_id)
       value_coder = context.coders[safe_coders[
           pipeline_components.pcollections[pcoll_id].coder_id]]
       elements_by_window = _WindowGroupingBuffer(si, value_coder)
+      if buffer_id not in pcoll_buffers:
+        pcoll_buffers[buffer_id] = _ListBuffer(
+            coder_impl=value_coder.get_impl())
       for element_data in pcoll_buffers[buffer_id]:
         elements_by_window.append(element_data)
 
@@ -575,9 +736,7 @@ class FnApiRunner(runner.PipelineRunner):
         for _, window, elements_data in elements_by_window.encoded_items():
           state_key = beam_fn_api_pb2.StateKey(
               iterable_side_input=beam_fn_api_pb2.StateKey.IterableSideInput(
-                  transform_id=transform_id,
-                  side_input_id=tag,
-                  window=window))
+                  transform_id=transform_id, side_input_id=tag, window=window))
           worker_handler.state.append_raw(state_key, elements_data)
       elif si.urn == common_urns.side_inputs.MULTIMAP.urn:
         for key, window, elements_data in elements_by_window.encoded_items():
@@ -589,8 +748,7 @@ class FnApiRunner(runner.PipelineRunner):
                   key=key))
           worker_handler.state.append_raw(state_key, elements_data)
       else:
-        raise ValueError(
-            "Unknown access pattern: '%s'" % si.urn)
+        raise ValueError("Unknown access pattern: '%s'" % si.urn)
 
   def _run_bundle_multiple_times_for_testing(
       self,
@@ -602,6 +760,7 @@ class FnApiRunner(runner.PipelineRunner):
       cache_token_generator
   ):
     # type: (...) -> None
+
     """
     If bundle_repeat > 0, replay every bundle for profiling and debugging.
     """
@@ -611,12 +770,15 @@ class FnApiRunner(runner.PipelineRunner):
       try:
         worker_handler.state.checkpoint()
         testing_bundle_manager = ParallelBundleManager(
-            worker_handler_list, lambda pcoll_id: [],
-            get_input_coder_callable, process_bundle_descriptor,
-            self._progress_frequency, k,
+            worker_handler_list,
+            lambda pcoll_id,
+            transform_id: _ListBuffer(coder_impl=get_input_coder_callable),
+            get_input_coder_callable,
+            process_bundle_descriptor,
+            self._progress_frequency,
+            k,
             num_workers=self._num_workers,
-            cache_token_generator=cache_token_generator
-        )
+            cache_token_generator=cache_token_generator)
         testing_bundle_manager.process_bundle(data_input, data_output)
       finally:
         worker_handler.state.restore()
@@ -627,8 +789,9 @@ class FnApiRunner(runner.PipelineRunner):
       pipeline_components,  # type: beam_runner_api_pb2.Components
       stage,  # type: fn_api_runner_transforms.Stage
       get_buffer_callable,
-      deferred_inputs  # type: DefaultDict[str, _ListBuffer]
-      ):
+      deferred_inputs  # type: DefaultDict[str, PartitionableBuffer]
+  ):
+    # type: (...) -> None
 
     for transform_id, timer_writes in stage.timer_pcollections:
 
@@ -636,8 +799,8 @@ class FnApiRunner(runner.PipelineRunner):
       windowed_timer_coder_impl = context.coders[
           pipeline_components.pcollections[timer_writes].coder_id].get_impl()
       written_timers = get_buffer_callable(
-          create_buffer_id(timer_writes, kind='timers'))
-      if written_timers:
+          create_buffer_id(timer_writes, kind='timers'), transform_id)
+      if not written_timers.cleared:
         # Keep only the "last" timer set per key and window.
         timers_by_key_and_window = {}
         for elements_data in written_timers:
@@ -654,28 +817,33 @@ class FnApiRunner(runner.PipelineRunner):
         for windowed_key_timer in timers_by_key_and_window.values():
           windowed_timer_coder_impl.encode_to_stream(
               windowed_key_timer, out, True)
-        deferred_inputs[transform_id] = _ListBuffer([out.get()])
-        written_timers[:] = []
+        deferred_inputs[transform_id] = _ListBuffer(
+            coder_impl=windowed_timer_coder_impl)
+        deferred_inputs[transform_id].append(out.get())
+        written_timers.clear()
 
   def _add_residuals_and_channel_splits_to_deferred_inputs(
       self,
       splits,  # type: List[beam_fn_api_pb2.ProcessBundleSplitResponse]
-      get_input_coder_callable,
+      get_input_coder_impl_callable,
       input_for_callable,
       last_sent,
-      deferred_inputs  # type: DefaultDict[str, _ListBuffer]
+      deferred_inputs  # type: DefaultDict[str, PartitionableBuffer]
   ):
+    # type: (...) -> None
 
     prev_stops = {}  # type: Dict[str, int]
     for split in splits:
       for delayed_application in split.residual_roots:
-        deferred_inputs[
-            input_for_callable(
-                delayed_application.application.transform_id,
-                delayed_application.application.input_id)
-        ].append(delayed_application.application.element)
+        name = input_for_callable(
+            delayed_application.application.transform_id,
+            delayed_application.application.input_id)
+        if name not in deferred_inputs:
+          deferred_inputs[name] = _ListBuffer(
+              coder_impl=get_input_coder_impl_callable(name))
+        deferred_inputs[name].append(delayed_application.application.element)
       for channel_split in split.channel_splits:
-        coder_impl = get_input_coder_callable(channel_split.transform_id)
+        coder_impl = get_input_coder_impl_callable(channel_split.transform_id)
         # TODO(SDF): This requires determanistic ordering of buffer iteration.
         # TODO(SDF): The return split is in terms of indices.  Ideally,
         # a runner could map these back to actual positions to effectively
@@ -689,12 +857,18 @@ class FnApiRunner(runner.PipelineRunner):
         # delayed applications.
 
         # Decode and recode to split the encoded buffer by element index.
-        all_elements = list(coder_impl.decode_all(b''.join(last_sent[
-            channel_split.transform_id])))
+        all_elements = list(
+            coder_impl.decode_all(
+                b''.join(last_sent[channel_split.transform_id])))
         residual_elements = all_elements[
-            channel_split.first_residual_element : prev_stops.get(
-                channel_split.transform_id, len(all_elements)) + 1]
+            channel_split.first_residual_element:prev_stops.
+            get(channel_split.transform_id, len(all_elements)) + 1]
         if residual_elements:
+          if channel_split.transform_id not in deferred_inputs:
+            coder_impl = get_input_coder_impl_callable(
+                channel_split.transform_id)
+            deferred_inputs[channel_split.transform_id] = _ListBuffer(
+                coder_impl=coder_impl)
           deferred_inputs[channel_split.transform_id].append(
               coder_impl.encode_all(residual_elements))
         prev_stops[
@@ -705,30 +879,40 @@ class FnApiRunner(runner.PipelineRunner):
       stage,  # type: fn_api_runner_transforms.Stage
       pipeline_components,  # type: beam_runner_api_pb2.Components
       data_api_service_descriptor,
-      pcoll_buffers  # type: DefaultDict[bytes, _ListBuffer]
+      pcoll_buffers,  # type: DefaultDict[bytes, PartitionableBuffer]
+      safe_coders
   ):
+    # type: (...) -> Tuple[Dict[Tuple[str, str], PartitionableBuffer], DataSideInput, Dict[Tuple[str, str], bytes]]
+
     # Returns maps of transform names to PCollection identifiers.
     # Also mutates IO stages to point to the data ApiServiceDescriptor.
-    data_input = {}
-    data_side_input = {}   # type: DataSideInput
-    data_output = {}    # type: Dict[Tuple[str, str], bytes]
+    data_input = {}  # type: Dict[Tuple[str, str], PartitionableBuffer]
+    data_side_input = {}  # type: DataSideInput
+    data_output = {}  # type: Dict[Tuple[str, str], bytes]
     for transform in stage.transforms:
       if transform.spec.urn in (bundle_processor.DATA_INPUT_URN,
                                 bundle_processor.DATA_OUTPUT_URN):
         pcoll_id = transform.spec.payload
         if transform.spec.urn == bundle_processor.DATA_INPUT_URN:
           target = transform.unique_name, only_element(transform.outputs)
-          if pcoll_id == fn_api_runner_transforms.IMPULSE_BUFFER:
-            data_input[target] = _ListBuffer([ENCODED_IMPULSE_VALUE])
+          coder_id = pipeline_components.pcollections[only_element(
+              transform.outputs.values())].coder_id
+          if coder_id in stage.context.coders[safe_coders[coder_id]]:
+            coder = stage.context.coders[safe_coders[coder_id]]
           else:
+            coder = stage.context.coders[coder_id]
+          if pcoll_id == fn_api_runner_transforms.IMPULSE_BUFFER:
+            data_input[target] = _ListBuffer(coder_impl=coder.get_impl())
+            data_input[target].append(ENCODED_IMPULSE_VALUE)
+          else:
+            if pcoll_id not in pcoll_buffers:
+              data_input[target] = _ListBuffer(coder_impl=coder.get_impl())
             data_input[target] = pcoll_buffers[pcoll_id]
-          coder_id = pipeline_components.pcollections[
-              only_element(transform.outputs.values())].coder_id
         elif transform.spec.urn == bundle_processor.DATA_OUTPUT_URN:
           target = transform.unique_name, only_element(transform.inputs)
           data_output[target] = pcoll_id
-          coder_id = pipeline_components.pcollections[
-              only_element(transform.inputs.values())].coder_id
+          coder_id = pipeline_components.pcollections[only_element(
+              transform.inputs.values())].coder_id
         else:
           raise NotImplementedError
         data_spec = beam_fn_api_pb2.RemoteGrpcPort(coder_id=coder_id)
@@ -748,10 +932,11 @@ class FnApiRunner(runner.PipelineRunner):
                  worker_handler_factory,  # type: Callable[[Optional[str], int], List[WorkerHandler]]
                  pipeline_components,  # type: beam_runner_api_pb2.Components
                  stage,  # type: fn_api_runner_transforms.Stage
-                 pcoll_buffers,  # type: DefaultDict[bytes, _ListBuffer]
+                 pcoll_buffers,  # type: DefaultDict[bytes, PartitionableBuffer]
                  safe_coders
                 ):
     # type: (...) -> beam_fn_api_pb2.InstructionResponse
+
     """Run an individual stage.
 
     Args:
@@ -788,32 +973,39 @@ class FnApiRunner(runner.PipelineRunner):
 
     _LOGGER.info('Running %s', stage.name)
     data_input, data_side_input, data_output = self._extract_endpoints(
-        stage, pipeline_components, data_api_service_descriptor, pcoll_buffers)
+        stage, pipeline_components, data_api_service_descriptor, pcoll_buffers,
+        context, safe_coders)
 
     process_bundle_descriptor = beam_fn_api_pb2.ProcessBundleDescriptor(
         id=self._next_uid(),
-        transforms={transform.unique_name: transform
-                    for transform in stage.transforms},
+        transforms={
+            transform.unique_name: transform
+            for transform in stage.transforms
+        },
         pcollections=dict(pipeline_components.pcollections.items()),
         coders=dict(pipeline_components.coders.items()),
         windowing_strategies=dict(
             pipeline_components.windowing_strategies.items()),
         environments=dict(pipeline_components.environments.items()))
 
-    if worker_handler.state_api_service_descriptor():
+    state_api_service_descriptor = worker_handler.state_api_service_descriptor()
+    if state_api_service_descriptor:
       process_bundle_descriptor.state_api_service_descriptor.url = (
-          worker_handler.state_api_service_descriptor().url)
+          state_api_service_descriptor.url)
 
     # Store the required side inputs into state so it is accessible for the
     # worker when it runs this bundle.
-    self._store_side_inputs_in_state(worker_handler,
-                                     context,
-                                     pipeline_components,
-                                     data_side_input,
-                                     pcoll_buffers,
-                                     safe_coders)
+    self._store_side_inputs_in_state(
+        worker_handler,
+        context,
+        pipeline_components,
+        data_side_input,
+        pcoll_buffers,
+        safe_coders)
 
-    def get_buffer(buffer_id):
+    def get_buffer(buffer_id, transform_id):
+      # type: (bytes) -> PartitionableBuffer
+
       """Returns the buffer for a given (operation_type, PCollection ID).
 
       For grouping-typed operations, we produce a ``_GroupingBuffer``. For
@@ -821,8 +1013,9 @@ class FnApiRunner(runner.PipelineRunner):
       """
       kind, name = split_buffer_id(buffer_id)
       if kind in ('materialize', 'timers'):
-        # If `buffer_id` is not a key in `pcoll_buffers`, it will be added by
-        # the `defaultdict`.
+        if buffer_id not in pcoll_buffers:
+          pcoll_buffers[buffer_id] = _ListBuffer(
+              coder_impl=get_input_coder_impl(transform_id))
         return pcoll_buffers[buffer_id]
       elif kind == 'group':
         # This is a grouping write, create a grouping buffer if needed.
@@ -837,8 +1030,8 @@ class FnApiRunner(runner.PipelineRunner):
           post_gbk_coder = context.coders[safe_coders[
               pipeline_components.pcollections[output_pcoll].coder_id]]
           windowing_strategy = context.windowing_strategies[
-              pipeline_components
-              .pcollections[output_pcoll].windowing_strategy_id]
+              pipeline_components.pcollections[output_pcoll].
+              windowing_strategy_id]
           pcoll_buffers[buffer_id] = _GroupingBuffer(
               pre_gbk_coder, post_gbk_coder, windowing_strategy)
       else:
@@ -848,22 +1041,32 @@ class FnApiRunner(runner.PipelineRunner):
       return pcoll_buffers[buffer_id]
 
     def get_input_coder_impl(transform_id):
-      return context.coders[safe_coders[
-          beam_fn_api_pb2.RemoteGrpcPort.FromString(
-              process_bundle_descriptor.transforms[transform_id].spec.payload
-          ).coder_id
-      ]].get_impl()
+      coder_id = beam_fn_api_pb2.RemoteGrpcPort.FromString(
+          process_bundle_descriptor.transforms[transform_id].spec.payload
+      ).coder_id
+      assert coder_id
+      if coder_id in safe_coders:
+        return context.coders[safe_coders[coder_id]].get_impl()
+      else:
+        return context.coders[coder_id].get_impl()
 
     # Change cache token across bundle repeats
     cache_token_generator = FnApiRunner.get_cache_token_generator(static=False)
 
     self._run_bundle_multiple_times_for_testing(
-        worker_handler_list, process_bundle_descriptor, data_input, data_output,
-        get_input_coder_impl, cache_token_generator=cache_token_generator)
+        worker_handler_list,
+        process_bundle_descriptor,
+        data_input,
+        data_output,
+        get_input_coder_impl,
+        cache_token_generator=cache_token_generator)
 
     bundle_manager = ParallelBundleManager(
-        worker_handler_list, get_buffer, get_input_coder_impl,
-        process_bundle_descriptor, self._progress_frequency,
+        worker_handler_list,
+        get_buffer,
+        get_input_coder_impl,
+        process_bundle_descriptor,
+        self._progress_frequency,
         num_workers=self._num_workers,
         cache_token_generator=cache_token_generator)
 
@@ -871,32 +1074,35 @@ class FnApiRunner(runner.PipelineRunner):
 
     def input_for(transform_id, input_id):
       # type: (str, str) -> str
-      input_pcoll = process_bundle_descriptor.transforms[
-          transform_id].inputs[input_id]
+      input_pcoll = process_bundle_descriptor.transforms[transform_id].inputs[
+          input_id]
       for read_id, proto in process_bundle_descriptor.transforms.items():
-        if (proto.spec.urn == bundle_processor.DATA_INPUT_URN
-            and input_pcoll in proto.outputs.values()):
+        if (proto.spec.urn == bundle_processor.DATA_INPUT_URN and
+            input_pcoll in proto.outputs.values()):
           return read_id
-      raise RuntimeError(
-          'No IO transform feeds %s' % transform_id)
+      raise RuntimeError('No IO transform feeds %s' % transform_id)
 
     last_result = result
     last_sent = data_input
 
+    # We cannot split deferred_input until we include residual_roots to
+    # merged results. Without residual_roots, pipeline stops earlier and we
+    # may miss some data.
+    bundle_manager._num_workers = 1
     while True:
-      deferred_inputs = collections.defaultdict(_ListBuffer)  # type: DefaultDict[str, _ListBuffer]
+      deferred_inputs = {}
 
       self._collect_written_timers_and_add_to_deferred_inputs(
           context, pipeline_components, stage, get_buffer, deferred_inputs)
-
       # Queue any process-initiated delayed bundle applications.
       for delayed_application in last_result.process_bundle.residual_roots:
-        deferred_inputs[
-            input_for(
-                delayed_application.application.transform_id,
-                delayed_application.application.input_id)
-        ].append(delayed_application.application.element)
-
+        name = input_for(
+            delayed_application.application.transform_id,
+            delayed_application.application.input_id)
+        if name not in deferred_inputs:
+          deferred_inputs[name] = _ListBuffer(
+              coder_impl=get_input_coder_impl(name))
+        deferred_inputs[name].append(delayed_application.application.element)
       # Queue any runner-initiated delayed bundle applications.
       self._add_residuals_and_channel_splits_to_deferred_inputs(
           splits, get_input_coder_impl, input_for, last_sent, deferred_inputs)
@@ -905,13 +1111,11 @@ class FnApiRunner(runner.PipelineRunner):
         # The worker will be waiting on these inputs as well.
         for other_input in data_input:
           if other_input not in deferred_inputs:
-            deferred_inputs[other_input] = _ListBuffer([])
+            deferred_inputs[other_input] = _ListBuffer(
+                coder_impl=get_input_coder_impl(other_input))
         # TODO(robertwb): merge results
-        # We cannot split deferred_input until we include residual_roots to
-        # merged results. Without residual_roots, pipeline stops earlier and we
-        # may miss some data.
-        bundle_manager._num_workers = 1
-        bundle_manager._skip_registration = True
+        # TODO(BEAM-8486): this should be changed to _registered
+        bundle_manager._skip_registration = True  # type: ignore[attr-defined]
         last_result, splits = bundle_manager.process_bundle(
             deferred_inputs, data_output)
         last_sent = deferred_inputs
@@ -931,9 +1135,12 @@ class FnApiRunner(runner.PipelineRunner):
   def _extract_endpoints(stage,  # type: fn_api_runner_transforms.Stage
                          pipeline_components,  # type: beam_runner_api_pb2.Components
                          data_api_service_descriptor, # type: Optional[endpoints_pb2.ApiServiceDescriptor]
-                         pcoll_buffers  # type: DefaultDict[bytes, _ListBuffer]
-                        ):
-    # type: (...) -> Tuple[Dict[str, _ListBuffer], DataSideInput, DataOutput]
+                         pcoll_buffers,  # type: DefaultDict[bytes, PartitionableBuffer]
+                         context,
+                         safe_coders
+                         ):
+    # type: (...) -> Tuple[Dict[str, PartitionableBuffer], DataSideInput, DataOutput]
+
     """Returns maps of transform names to PCollection identifiers.
 
     Also mutates IO stages to point to the data ApiServiceDescriptor.
@@ -952,7 +1159,7 @@ class FnApiRunner(runner.PipelineRunner):
         PCollection buffer; `data_output` is a dictionary mapping
         (transform_name, output_name) to a PCollection ID.
     """
-    data_input = {}  # type: Dict[str, _ListBuffer]
+    data_input = {}  # type: Dict[str, PartitionableBuffer]
     data_side_input = {}  # type: DataSideInput
     data_output = {}  # type: DataOutput
     for transform in stage.transforms:
@@ -960,17 +1167,24 @@ class FnApiRunner(runner.PipelineRunner):
                                 bundle_processor.DATA_OUTPUT_URN):
         pcoll_id = transform.spec.payload
         if transform.spec.urn == bundle_processor.DATA_INPUT_URN:
+          coder_id = pipeline_components.pcollections[only_element(
+              transform.outputs.values())].coder_id
+          if coder_id in safe_coders:
+            coder = context.coders[safe_coders[coder_id]]
+          else:
+            coder = context.coders[coder_id]
           if pcoll_id == fn_api_runner_transforms.IMPULSE_BUFFER:
             data_input[transform.unique_name] = _ListBuffer(
-                [ENCODED_IMPULSE_VALUE])
+                coder_impl=coder.get_impl())
+            data_input[transform.unique_name].append(ENCODED_IMPULSE_VALUE)
           else:
+            if pcoll_id not in pcoll_buffers:
+              pcoll_buffers[pcoll_id] = _ListBuffer(coder_impl=coder.get_impl())
             data_input[transform.unique_name] = pcoll_buffers[pcoll_id]
-          coder_id = pipeline_components.pcollections[
-              only_element(transform.outputs.values())].coder_id
         elif transform.spec.urn == bundle_processor.DATA_OUTPUT_URN:
           data_output[transform.unique_name] = pcoll_id
-          coder_id = pipeline_components.pcollections[
-              only_element(transform.inputs.values())].coder_id
+          coder_id = pipeline_components.pcollections[only_element(
+              transform.inputs.values())].coder_id
         else:
           raise NotImplementedError
         data_spec = beam_fn_api_pb2.RemoteGrpcPort(coder_id=coder_id)
@@ -988,14 +1202,16 @@ class FnApiRunner(runner.PipelineRunner):
 
   # These classes are used to interact with the worker.
 
-  class StateServicer(beam_fn_api_pb2_grpc.BeamFnStateServicer):
-
+  class StateServicer(beam_fn_api_pb2_grpc.BeamFnStateServicer,
+                      sdk_worker.StateHandler):
     class CopyOnWriteState(object):
       def __init__(self, underlying):
+        # type: (DefaultDict[bytes, Buffer]) -> None
         self._underlying = underlying
-        self._overlay = {}
+        self._overlay = {}  # type: Dict[bytes, Buffer]
 
       def __getitem__(self, key):
+        # type: (bytes) -> Buffer
         if key in self._overlay:
           return self._overlay[key]
         else:
@@ -1007,11 +1223,17 @@ class FnApiRunner(runner.PipelineRunner):
         self._overlay[key] = []
 
       def commit(self):
+        # type: () -> DefaultDict[bytes, Buffer]
         self._underlying.update(self._overlay)
         return self._underlying
 
     class CopyOnWriteList(object):
-      def __init__(self, underlying, overlay, key):
+      def __init__(self,
+                   underlying,  # type: DefaultDict[bytes, Buffer]
+                   overlay,  # type: Dict[bytes, Buffer]
+                   key  # type: bytes
+                  ):
+        # type: (...) -> None
         self._underlying = underlying
         self._overlay = overlay
         self._key = key
@@ -1029,24 +1251,37 @@ class FnApiRunner(runner.PipelineRunner):
           self._overlay[self._key] = list(self._underlying[self._key])
         self._overlay[self._key].append(item)
 
+    StateType = Union[CopyOnWriteState, DefaultDict[bytes, Buffer]]
+
     def __init__(self):
+      # type: () -> None
       self._lock = threading.Lock()
-      self._state = collections.defaultdict(list)  # type: DefaultDict[bytes, List[bytes]]
-      self._checkpoint = None
+      self._state = collections.defaultdict(
+          list)  # type: FnApiRunner.StateServicer.StateType
+      self._checkpoint = None  # type: Optional[FnApiRunner.StateServicer.StateType]
       self._use_continuation_tokens = False
-      self._continuations = {}
+      self._continuations = {}  # type: Dict[bytes, Tuple[bytes, ...]]
 
     def checkpoint(self):
-      assert self._checkpoint is None
+      # type: () -> None
+      assert self._checkpoint is None and not \
+        isinstance(self._state, FnApiRunner.StateServicer.CopyOnWriteState)
       self._checkpoint = self._state
       self._state = FnApiRunner.StateServicer.CopyOnWriteState(self._state)
 
     def commit(self):
+      # type: () -> None
+      assert isinstance(self._state,
+                        FnApiRunner.StateServicer.CopyOnWriteState) and \
+             isinstance(self._checkpoint,
+                        FnApiRunner.StateServicer.CopyOnWriteState)
       self._state.commit()
       self._state = self._checkpoint.commit()
       self._checkpoint = None
 
     def restore(self):
+      # type: () -> None
+      assert self._checkpoint is not None
       self._state = self._checkpoint
       self._checkpoint = None
 
@@ -1064,25 +1299,26 @@ class FnApiRunner(runner.PipelineRunner):
         if self._use_continuation_tokens:
           # The token is "nonce:index".
           if not continuation_token:
-            token_base = 'token_%x' % len(self._continuations)
+            token_base = b'token_%x' % len(self._continuations)
             self._continuations[token_base] = tuple(full_state)
-            return b'', '%s:0' % token_base
+            return b'', b'%s:0' % token_base
           else:
-            token_base, index = continuation_token.split(':')
+            token_base, index = continuation_token.split(b':')
             ix = int(index)
-            full_state = self._continuations[token_base]
-            if ix == len(full_state):
+            full_state_cont = self._continuations[token_base]
+            if ix == len(full_state_cont):
               return b'', None
             else:
-              return full_state[ix], '%s:%d' % (token_base, ix + 1)
+              return full_state_cont[ix], b'%s:%d' % (token_base, ix + 1)
         else:
           assert not continuation_token
           return b''.join(full_state), None
 
-    def append_raw(self,
-                   state_key,  # type: beam_fn_api_pb2.StateKey
-                   data  # type: bytes
-                  ):
+    def append_raw(
+        self,
+        state_key,  # type: beam_fn_api_pb2.StateKey
+        data  # type: bytes
+    ):
       # type: (...) -> _Future
       with self._lock:
         self._state[self._to_key(state_key)].append(data)
@@ -1130,30 +1366,29 @@ class FnApiRunner(runner.PipelineRunner):
         elif request_type == 'append':
           self._state.append_raw(request.state_key, request.append.data)
           yield beam_fn_api_pb2.StateResponse(
-              id=request.id,
-              append=beam_fn_api_pb2.StateAppendResponse())
+              id=request.id, append=beam_fn_api_pb2.StateAppendResponse())
         elif request_type == 'clear':
           self._state.clear(request.state_key)
           yield beam_fn_api_pb2.StateResponse(
-              id=request.id,
-              clear=beam_fn_api_pb2.StateClearResponse())
+              id=request.id, clear=beam_fn_api_pb2.StateClearResponse())
         else:
           raise NotImplementedError('Unknown state request: %s' % request_type)
 
   class SingletonStateHandlerFactory(sdk_worker.StateHandlerFactory):
     """A singleton cache for a StateServicer."""
-
     def __init__(self, state_handler):
-      # type: (sdk_worker.StateHandler) -> None
+      # type: (sdk_worker.CachingStateHandler) -> None
       self._state_handler = state_handler
 
     def create_state_handler(self, api_service_descriptor):
-      # type: (endpoints_pb2.ApiServiceDescriptor) -> sdk_worker.StateHandler
+      # type: (endpoints_pb2.ApiServiceDescriptor) -> sdk_worker.CachingStateHandler
+
       """Returns the singleton state handler."""
       return self._state_handler
 
     def close(self):
-      # type: (...) -> None
+      # type: () -> None
+
       """Does nothing."""
       pass
 
@@ -1166,8 +1401,8 @@ class FnApiRunner(runner.PipelineRunner):
     """
     def generate_token(identifier):
       return beam_fn_api_pb2.ProcessBundleRequest.CacheToken(
-          user_state=beam_fn_api_pb2
-          .ProcessBundleRequest.CacheToken.UserState(),
+          user_state=beam_fn_api_pb2.ProcessBundleRequest.CacheToken.UserState(
+          ),
           token="cache_token_{}".format(identifier).encode("utf-8"))
 
     class StaticGenerator(object):
@@ -1210,6 +1445,9 @@ class WorkerHandler(object):
   _worker_id_counter = -1
   _lock = threading.Lock()
 
+  control_conn = None  # type: ControlConnection
+  data_conn = None  # type: data_plane._GrpcDataChannel
+
   def __init__(self,
                control_handler,
                data_plane_handler,
@@ -1217,6 +1455,7 @@ class WorkerHandler(object):
                provision_info  # type: Optional[ExtendedProvisionInfo]
               ):
     # type: (...) -> None
+
     """Initialize a WorkerHandler.
 
     Args:
@@ -1259,14 +1498,16 @@ class WorkerHandler(object):
     raise NotImplementedError
 
   @classmethod
-  def register_environment(cls,
-                           urn,  # type: str
-                           payload_type  # type: Optional[Type[T]]
-                          ):
+  def register_environment(
+      cls,
+      urn,  # type: str
+      payload_type  # type: Optional[Type[T]]
+  ):
     # type: (...) -> Callable[[Callable[[T, FnApiRunner.StateServicer, Optional[ExtendedProvisionInfo], GrpcServer], WorkerHandler]], Callable[[T, FnApiRunner.StateServicer, Optional[ExtendedProvisionInfo], GrpcServer], WorkerHandler]]
     def wrapper(constructor):
       cls._registered_environments[urn] = constructor, payload_type
       return constructor
+
     return wrapper
 
   @classmethod
@@ -1291,7 +1532,7 @@ class EmbeddedWorkerHandler(WorkerHandler):
 
   def __init__(self,
                unused_payload,  # type: None
-               state,
+               state,  # type: sdk_worker.StateHandler
                provision_info,  # type: Optional[ExtendedProvisionInfo]
                unused_grpc_server=None
               ):
@@ -1305,8 +1546,7 @@ class EmbeddedWorkerHandler(WorkerHandler):
         FnApiRunner.SingletonStateHandlerFactory(
             sdk_worker.CachingStateHandler(state_cache, state)),
         data_plane.InMemoryDataChannelFactory(
-            self.data_plane_handler.inverse()),
-        {})
+            self.data_plane_handler.inverse()), {})
     self.worker = sdk_worker.SdkWorker(
         self.bundle_processor_cache,
         state_cache_metrics_fn=state_cache.get_monitoring_infos)
@@ -1364,22 +1604,29 @@ class BasicLoggingService(beam_fn_api_pb2_grpc.BeamFnLoggingServicer):
         logging.log(self.LOG_LEVEL_MAP[log.severity], str(log))
 
 
-class BasicProvisionService(
-    beam_provision_api_pb2_grpc.ProvisionServiceServicer):
-
-  def __init__(self, info):
-    # type: (Optional[beam_provision_api_pb2.ProvisionInfo]) -> None
-    self._info = info
+class BasicProvisionService(beam_provision_api_pb2_grpc.ProvisionServiceServicer
+                            ):
+  def __init__(self, base_info, worker_manager):
+    # type: (Optional[beam_provision_api_pb2.ProvisionInfo], WorkerHandlerManager) -> None
+    self._base_info = base_info
+    self._worker_manager = worker_manager
 
   def GetProvisionInfo(self, request, context=None):
     # type: (...) -> beam_provision_api_pb2.GetProvisionInfoResponse
-    return beam_provision_api_pb2.GetProvisionInfoResponse(
-        info=self._info)
+    info = copy.copy(self._base_info)
+    logging.error(('info', info, 'context', context))
+    if context:
+      worker_id = dict(context.invocation_metadata())['worker_id']
+      worker = self._worker_manager.get_worker(worker_id)
+      info.logging_endpoint.CopyFrom(worker.logging_api_service_descriptor())
+      info.artifact_endpoint.CopyFrom(worker.artifact_api_service_descriptor())
+      info.control_endpoint.CopyFrom(worker.control_api_service_descriptor())
+      logging.error(('info', info, 'worker_id', worker_id))
+    return beam_provision_api_pb2.GetProvisionInfoResponse(info=info)
 
 
 class EmptyArtifactRetrievalService(
     beam_artifact_api_pb2_grpc.ArtifactRetrievalServiceServicer):
-
   def GetManifest(self, request, context=None):
     return beam_artifact_api_pb2.GetManifestResponse(
         manifest=beam_artifact_api_pb2.Manifest())
@@ -1395,6 +1642,7 @@ class GrpcServer(object):
   def __init__(self,
                state,  # type: FnApiRunner.StateServicer
                provision_info,  # type: Optional[ExtendedProvisionInfo]
+               worker_manager,  # type: WorkerHandlerManager
               ):
     # type: (...) -> None
     self.state = state
@@ -1409,13 +1657,11 @@ class GrpcServer(object):
     no_max_message_sizes = [("grpc.max_receive_message_length", -1),
                             ("grpc.max_send_message_length", -1)]
     self.data_server = grpc.server(
-        UnboundedThreadPoolExecutor(),
-        options=no_max_message_sizes)
+        UnboundedThreadPoolExecutor(), options=no_max_message_sizes)
     self.data_port = self.data_server.add_insecure_port('[::]:0')
 
     self.state_server = grpc.server(
-        UnboundedThreadPoolExecutor(),
-        options=no_max_message_sizes)
+        UnboundedThreadPoolExecutor(), options=no_max_message_sizes)
     self.state_port = self.state_server.add_insecure_port('[::]:0')
 
     self.control_handler = BeamFnControlServicer()
@@ -1425,12 +1671,9 @@ class GrpcServer(object):
     # If we have provision info, serve these off the control port as well.
     if self.provision_info:
       if self.provision_info.provision_info:
-        provision_info = self.provision_info.provision_info
-        if not provision_info.worker_id:
-          provision_info = copy.copy(provision_info)
-          provision_info.worker_id = str(uuid.uuid4())
         beam_provision_api_pb2_grpc.add_ProvisionServiceServicer_to_server(
-            BasicProvisionService(self.provision_info.provision_info),
+            BasicProvisionService(
+                self.provision_info.provision_info, worker_manager),
             self.control_server)
 
       if self.provision_info.artifact_staging_dir:
@@ -1442,21 +1685,19 @@ class GrpcServer(object):
       beam_artifact_api_pb2_grpc.add_ArtifactRetrievalServiceServicer_to_server(
           service, self.control_server)
 
-    self.data_plane_handler = data_plane.BeamFnDataServicer()
+    self.data_plane_handler = data_plane.BeamFnDataServicer(
+        DATA_BUFFER_TIME_LIMIT_MS)
     beam_fn_api_pb2_grpc.add_BeamFnDataServicer_to_server(
         self.data_plane_handler, self.data_server)
 
     beam_fn_api_pb2_grpc.add_BeamFnStateServicer_to_server(
-        FnApiRunner.GrpcStateServicer(state),
-        self.state_server)
+        FnApiRunner.GrpcStateServicer(state), self.state_server)
 
     self.logging_server = grpc.server(
-        UnboundedThreadPoolExecutor(),
-        options=no_max_message_sizes)
+        UnboundedThreadPoolExecutor(), options=no_max_message_sizes)
     self.logging_port = self.logging_server.add_insecure_port('[::]:0')
     beam_fn_api_pb2_grpc.add_BeamFnLoggingServicer_to_server(
-        BasicLoggingService(),
-        self.logging_server)
+        BasicLoggingService(), self.logging_server)
 
     _LOGGER.info('starting control server on port %s', self.control_port)
     _LOGGER.info('starting data server on port %s', self.data_port)
@@ -1490,8 +1731,10 @@ class GrpcWorkerHandler(WorkerHandler):
     # type: (...) -> None
     self._grpc_server = grpc_server
     super(GrpcWorkerHandler, self).__init__(
-        self._grpc_server.control_handler, self._grpc_server.data_plane_handler,
-        state, provision_info)
+        self._grpc_server.control_handler,
+        self._grpc_server.data_plane_handler,
+        state,
+        provision_info)
     self.state = state
 
     self.control_address = self.port_from_worker(self._grpc_server.control_port)
@@ -1500,6 +1743,16 @@ class GrpcWorkerHandler(WorkerHandler):
 
     self.data_conn = self._grpc_server.data_plane_handler.get_conn_by_worker_id(
         self.worker_id)
+
+  def control_api_service_descriptor(self):
+    # type: () -> endpoints_pb2.ApiServiceDescriptor
+    return endpoints_pb2.ApiServiceDescriptor(
+        url=self.port_from_worker(self._grpc_server.control_port))
+
+  def artifact_api_service_descriptor(self):
+    # type: () -> endpoints_pb2.ApiServiceDescriptor
+    return endpoints_pb2.ApiServiceDescriptor(
+        url=self.port_from_worker(self._grpc_server.control_port))
 
   def data_api_service_descriptor(self):
     # type: () -> endpoints_pb2.ApiServiceDescriptor
@@ -1538,8 +1791,8 @@ class ExternalWorkerHandler(GrpcWorkerHandler):
                grpc_server  # type: GrpcServer
               ):
     # type: (...) -> None
-    super(ExternalWorkerHandler, self).__init__(state, provision_info,
-                                                grpc_server)
+    super(ExternalWorkerHandler,
+          self).__init__(state, provision_info, grpc_server)
     self._external_payload = external_payload
 
   def start_worker(self):
@@ -1581,18 +1834,21 @@ class EmbeddedGrpcWorkerHandler(GrpcWorkerHandler):
                grpc_server  # type: GrpcServer
               ):
     # type: (...) -> None
-    super(EmbeddedGrpcWorkerHandler, self).__init__(state, provision_info,
-                                                    grpc_server)
-    if payload:
-      state_cache_size = payload.decode('ascii')
-      self._state_cache_size = int(state_cache_size)
-    else:
-      self._state_cache_size = STATE_CACHE_SIZE
+    super(EmbeddedGrpcWorkerHandler,
+          self).__init__(state, provision_info, grpc_server)
+
+    from apache_beam.transforms.environments import EmbeddedPythonGrpcEnvironment
+    config = EmbeddedPythonGrpcEnvironment.parse_config(payload.decode('utf-8'))
+    self._state_cache_size = config.get('state_cache_size') or STATE_CACHE_SIZE
+    self._data_buffer_time_limit_ms = \
+        config.get('data_buffer_time_limit_ms') or DATA_BUFFER_TIME_LIMIT_MS
 
   def start_worker(self):
     # type: () -> None
     self.worker = sdk_worker.SdkHarness(
-        self.control_address, state_cache_size=self._state_cache_size,
+        self.control_address,
+        state_cache_size=self._state_cache_size,
+        data_buffer_time_limit_ms=self._data_buffer_time_limit_ms,
         worker_id=self.worker_id)
     self.worker_thread = threading.Thread(
         name='run_worker', target=self.worker.run)
@@ -1618,8 +1874,8 @@ class SubprocessSdkWorkerHandler(GrpcWorkerHandler):
                grpc_server  # type: GrpcServer
               ):
     # type: (...) -> None
-    super(SubprocessSdkWorkerHandler, self).__init__(state, provision_info,
-                                                     grpc_server)
+    super(SubprocessSdkWorkerHandler,
+          self).__init__(state, provision_info, grpc_server)
     self._worker_command_line = worker_command_line
 
   def start_worker(self):
@@ -1636,8 +1892,8 @@ class SubprocessSdkWorkerHandler(GrpcWorkerHandler):
     self.worker_thread.join()
 
 
-@WorkerHandler.register_environment(common_urns.environments.DOCKER.urn,
-                                    beam_runner_api_pb2.DockerPayload)
+@WorkerHandler.register_environment(
+    common_urns.environments.DOCKER.urn, beam_runner_api_pb2.DockerPayload)
 class DockerSdkWorkerHandler(GrpcWorkerHandler):
   def __init__(self,
                payload,  # type: beam_runner_api_pb2.DockerPayload
@@ -1646,8 +1902,8 @@ class DockerSdkWorkerHandler(GrpcWorkerHandler):
                grpc_server  # type: GrpcServer
               ):
     # type: (...) -> None
-    super(DockerSdkWorkerHandler, self).__init__(state, provision_info,
-                                                 grpc_server)
+    super(DockerSdkWorkerHandler,
+          self).__init__(state, provision_info, grpc_server)
     self._container_image = payload.container_image
     self._container_id = None  # type: Optional[bytes]
 
@@ -1665,38 +1921,35 @@ class DockerSdkWorkerHandler(GrpcWorkerHandler):
         subprocess.check_call(['docker', 'pull', self._container_image])
       except Exception:
         _LOGGER.info('Unable to pull image %s' % self._container_image)
-      self._container_id = subprocess.check_output(
-          ['docker',
-           'run',
-           '-d',
-           # TODO:  credentials
-           '--network=host',
-           self._container_image,
-           '--id=%s' % self.worker_id,
-           '--logging_endpoint=%s' % self.logging_api_service_descriptor().url,
-           '--control_endpoint=%s' % self.control_address,
-           '--artifact_endpoint=%s' % self.control_address,
-           '--provision_endpoint=%s' % self.control_address,
-          ]).strip()
+      self._container_id = subprocess.check_output([
+          'docker',
+          'run',
+          '-d',
+          # TODO:  credentials
+          '--network=host',
+          self._container_image,
+          '--id=%s' % self.worker_id,
+          '--logging_endpoint=%s' % self.logging_api_service_descriptor().url,
+          '--control_endpoint=%s' % self.control_address,
+          '--artifact_endpoint=%s' % self.control_address,
+          '--provision_endpoint=%s' % self.control_address,
+      ]).strip()
+      assert self._container_id is not None
       while True:
         status = subprocess.check_output([
-            'docker',
-            'inspect',
-            '-f',
-            '{{.State.Status}}',
-            self._container_id]).strip()
-        _LOGGER.info('Waiting for docker to start up.Current status is %s' %
-                     status)
+            'docker', 'inspect', '-f', '{{.State.Status}}', self._container_id
+        ]).strip()
+        _LOGGER.info(
+            'Waiting for docker to start up.Current status is %s' % status)
         if status == b'running':
-          _LOGGER.info('Docker container is running. container_id = %s, '
-                       'worker_id = %s', self._container_id, self.worker_id)
+          _LOGGER.info(
+              'Docker container is running. container_id = %s, '
+              'worker_id = %s',
+              self._container_id,
+              self.worker_id)
           break
         elif status in (b'dead', b'exited'):
-          subprocess.call([
-              'docker',
-              'container',
-              'logs',
-              self._container_id])
+          subprocess.call(['docker', 'container', 'logs', self._container_id])
           raise RuntimeError('SDK failed to start. Final status is %s' % status)
       time.sleep(1)
 
@@ -1704,10 +1957,7 @@ class DockerSdkWorkerHandler(GrpcWorkerHandler):
     # type: () -> None
     if self._container_id:
       with SUBPROCESS_LOCK:
-        subprocess.call([
-            'docker',
-            'kill',
-            self._container_id])
+        subprocess.call(['docker', 'kill', self._container_id])
 
 
 class WorkerHandlerManager(object):
@@ -1723,14 +1973,17 @@ class WorkerHandlerManager(object):
     # type: (...) -> None
     self._environments = environments
     self._job_provision_info = job_provision_info
-    self._cached_handlers = collections.defaultdict(list)  # type: DefaultDict[str, List[WorkerHandler]]
-    self._state = FnApiRunner.StateServicer() # rename?
+    self._cached_handlers = collections.defaultdict(
+        list)  # type: DefaultDict[str, List[WorkerHandler]]
+    self._workers_by_id = {}  # type: Dict[str, WorkerHandler]
+    self._state = FnApiRunner.StateServicer()  # rename?
     self._grpc_server = None  # type: Optional[GrpcServer]
 
-  def get_worker_handlers(self,
-                          environment_id,  # type: Optional[str]
-                          num_workers  # type: int
-                         ):
+  def get_worker_handlers(
+      self,
+      environment_id,  # type: Optional[str]
+      num_workers  # type: int
+  ):
     # type: (...) -> List[WorkerHandler]
     if environment_id is None:
       # Any environment will do, pick one arbitrarily.
@@ -1739,20 +1992,27 @@ class WorkerHandlerManager(object):
 
     # assume all environments except EMBEDDED_PYTHON use gRPC.
     if environment.urn == python_urns.EMBEDDED_PYTHON:
-      pass # no need for a gRPC server
+      pass  # no need for a gRPC server
     elif self._grpc_server is None:
-      self._grpc_server = GrpcServer(self._state, self._job_provision_info)
+      self._grpc_server = GrpcServer(
+          self._state, self._job_provision_info, self)
 
     worker_handler_list = self._cached_handlers[environment_id]
     if len(worker_handler_list) < num_workers:
       for _ in range(len(worker_handler_list), num_workers):
         worker_handler = WorkerHandler.create(
-            environment, self._state, self._job_provision_info,
+            environment,
+            self._state,
+            self._job_provision_info,
             self._grpc_server)
-        _LOGGER.info("Created Worker handler %s for environment %s",
-                     worker_handler, environment)
+        _LOGGER.info(
+            "Created Worker handler %s for environment %s",
+            worker_handler,
+            environment)
         self._cached_handlers[environment_id].append(worker_handler)
+        self._workers_by_id[worker_handler.worker_id] = worker_handler
         worker_handler.start_worker()
+    _LOGGER.error("created %s workers %s", num_workers, self._workers_by_id)
     return self._cached_handlers[environment_id][:num_workers]
 
   def close_all(self):
@@ -1761,22 +2021,29 @@ class WorkerHandlerManager(object):
         try:
           worker_handler.close()
         except Exception:
-          _LOGGER.error("Error closing worker_handler %s" % worker_handler,
-                        exc_info=True)
+          _LOGGER.error(
+              "Error closing worker_handler %s" % worker_handler, exc_info=True)
     self._cached_handlers = {}
+    self._workers_by_id = {}
     if self._grpc_server is not None:
       self._grpc_server.close()
       self._grpc_server = None
+
+  def get_worker(self, worker_id):
+    _LOGGER.error(self._workers_by_id)
+    return self._workers_by_id[worker_id]
 
 
 class ExtendedProvisionInfo(object):
   def __init__(self,
                provision_info=None,  # type: Optional[beam_provision_api_pb2.ProvisionInfo]
-               artifact_staging_dir=None
+               artifact_staging_dir=None,
+               job_name=None,  # type: Optional[str]
               ):
     self.provision_info = (
         provision_info or beam_provision_api_pb2.ProvisionInfo())
     self.artifact_staging_dir = artifact_staging_dir
+    self.job_name = job_name
 
 
 _split_managers = []
@@ -1817,7 +2084,7 @@ class BundleManager(object):
 
   def __init__(self,
                worker_handler_list,  # type: Sequence[WorkerHandler]
-               get_buffer,  # type: Callable[[bytes], list]
+               get_buffer,  # type: Callable[[bytes], PartitionableBuffer]
                get_input_coder_impl,  # type: Callable[[str], CoderImpl]
                bundle_descriptor,  # type: beam_fn_api_pb2.ProcessBundleDescriptor
                progress_frequency=None,
@@ -1848,6 +2115,7 @@ class BundleManager(object):
                             read_transform_id,  # type: str
                             byte_streams
                            ):
+    assert self._worker_handler is not None
     data_out = self._worker_handler.data_conn.output_stream(
         process_bundle_id, read_transform_id)
     for byte_stream in byte_streams:
@@ -1859,6 +2127,7 @@ class BundleManager(object):
     if self._registered:
       registration_future = None
     else:
+      assert self._worker_handler is not None
       process_bundle_registration = beam_fn_api_pb2.InstructionRequest(
           register=beam_fn_api_pb2.RegisterRequest(
               process_bundle_descriptor=[self._bundle_descriptor]))
@@ -1873,8 +2142,8 @@ class BundleManager(object):
     unique_names = set(
         t.unique_name for t in self._bundle_descriptor.transforms.values())
     for stage_name, candidate in reversed(_split_managers):
-      if (stage_name in unique_names
-          or (stage_name + '/Process') in unique_names):
+      if (stage_name in unique_names or
+          (stage_name + '/Process') in unique_names):
         split_manager = candidate
         break
     else:
@@ -1884,15 +2153,16 @@ class BundleManager(object):
 
   def _generate_splits_for_testing(self,
                                    split_manager,
-                                   inputs,  # type: Mapping[str, _ListBuffer]
+                                   inputs,  # type: Mapping[str, PartitionableBuffer]
                                    process_bundle_id):
     # type: (...) -> List[beam_fn_api_pb2.ProcessBundleSplitResponse]
     split_results = []  # type: List[beam_fn_api_pb2.ProcessBundleSplitResponse]
     read_transform_id, buffer_data = only_element(inputs.items())
-
     byte_stream = b''.join(buffer_data)
-    num_elements = len(list(
-        self._get_input_coder_impl(read_transform_id).decode_all(byte_stream)))
+    num_elements = len(
+        list(
+            self._get_input_coder_impl(read_transform_id).decode_all(
+                byte_stream)))
 
     # Start the split manager in case it wants to set any breakpoints.
     split_manager_generator = split_manager(num_elements)
@@ -1906,18 +2176,19 @@ class BundleManager(object):
     self._send_input_to_worker(
         process_bundle_id, read_transform_id, [byte_stream])
 
+    assert self._worker_handler is not None
+
     # Execute the requested splits.
     while not done:
       if split_fraction is None:
         split_result = None
       else:
         split_request = beam_fn_api_pb2.InstructionRequest(
-            process_bundle_split=
-            beam_fn_api_pb2.ProcessBundleSplitRequest(
+            process_bundle_split=beam_fn_api_pb2.ProcessBundleSplitRequest(
                 instruction_id=process_bundle_id,
                 desired_splits={
-                    read_transform_id:
-                    beam_fn_api_pb2.ProcessBundleSplitRequest.DesiredSplit(
+                    read_transform_id: beam_fn_api_pb2.
+                    ProcessBundleSplitRequest.DesiredSplit(
                         fraction_of_remainder=split_fraction,
                         estimated_input_elements=num_elements)
                 }))
@@ -1944,7 +2215,7 @@ class BundleManager(object):
     return split_results
 
   def process_bundle(self,
-                     inputs,  # type: Mapping[str, _ListBuffer]
+                     inputs,  # type: Mapping[str, PartitionableBuffer]
                      expected_outputs  # type: DataOutput
                     ):
     # type: (...) -> BundleProcessResult
@@ -1965,8 +2236,7 @@ class BundleManager(object):
     if not split_manager:
       # If there is no split_manager, write all input data to the channel.
       for transform_id, elements in inputs.items():
-        self._send_input_to_worker(
-            process_bundle_id, transform_id, elements)
+        self._send_input_to_worker(process_bundle_id, transform_id, elements)
 
     # Actually start the bundle.
     process_bundle_req = beam_fn_api_pb2.InstructionRequest(
@@ -1977,8 +2247,9 @@ class BundleManager(object):
     result_future = self._worker_handler.control_conn.push(process_bundle_req)
 
     split_results = []  # type: List[beam_fn_api_pb2.ProcessBundleSplitResponse]
-    with ProgressRequester(
-        self._worker_handler, process_bundle_id, self._progress_frequency):
+    with ProgressRequester(self._worker_handler,
+                           process_bundle_id,
+                           self._progress_frequency):
 
       if split_manager:
         split_results = self._generate_splits_for_testing(
@@ -1988,12 +2259,13 @@ class BundleManager(object):
       for output in self._worker_handler.data_conn.input_elements(
           process_bundle_id,
           expected_outputs.keys(),
-          abort_callback=lambda: (result_future.is_done()
-                                  and result_future.get().error)):
+          abort_callback=lambda:
+          (result_future.is_done() and result_future.get().error)):
         if output.transform_id in expected_outputs:
           with BundleManager._lock:
             self._get_buffer(
-                expected_outputs[output.transform_id]).append(output.data)
+                expected_outputs[output.transform_id],
+                output.transform_id).append(output.data)
 
       _LOGGER.debug('Wait for the bundle %s to finish.' % process_bundle_id)
       result = result_future.get()  # type: beam_fn_api_pb2.InstructionResponse
@@ -2003,10 +2275,8 @@ class BundleManager(object):
 
     if result.process_bundle.requires_finalization:
       finalize_request = beam_fn_api_pb2.InstructionRequest(
-          finalize_bundle=
-          beam_fn_api_pb2.FinalizeBundleRequest(
-              instruction_id=process_bundle_id
-          ))
+          finalize_bundle=beam_fn_api_pb2.FinalizeBundleRequest(
+              instruction_id=process_bundle_id))
       self._worker_handler.control_conn.push(finalize_request)
 
     return result, split_results
@@ -2017,7 +2287,7 @@ class ParallelBundleManager(BundleManager):
   def __init__(
       self,
       worker_handler_list,  # type: Sequence[WorkerHandler]
-      get_buffer,  # type: Callable[[bytes], list]
+      get_buffer,  # type: Callable[[bytes], PartitionableBuffer]
       get_input_coder_impl,  # type: Callable[[str], CoderImpl]
       bundle_descriptor,  # type: beam_fn_api_pb2.ProcessBundleDescriptor
       progress_frequency=None,
@@ -2026,30 +2296,44 @@ class ParallelBundleManager(BundleManager):
       **kwargs):
     # type: (...) -> None
     super(ParallelBundleManager, self).__init__(
-        worker_handler_list, get_buffer, get_input_coder_impl,
-        bundle_descriptor, progress_frequency, skip_registration,
+        worker_handler_list,
+        get_buffer,
+        get_input_coder_impl,
+        bundle_descriptor,
+        progress_frequency,
+        skip_registration,
         cache_token_generator=cache_token_generator)
     self._num_workers = kwargs.pop('num_workers', 1)
 
   def process_bundle(self,
-                     inputs,  # type: Mapping[str, _ListBuffer]
+                     inputs,  # type: Mapping[str, PartitionableBuffer]
                      expected_outputs  # type: DataOutput
                     ):
     # type: (...) -> BundleProcessResult
-    part_inputs = [{} for _ in range(self._num_workers)]  # type: List[Dict[str, List[bytes]]]
+    part_inputs = [{} for _ in range(self._num_workers)
+                   ]  # type: List[Dict[str, List[bytes]]]
     for name, input in inputs.items():
       for ix, part in enumerate(input.partition(self._num_workers)):
         part_inputs[ix][name] = part
 
     merged_result = None  # type: Optional[beam_fn_api_pb2.InstructionResponse]
-    split_result_list = []  # type: List[beam_fn_api_pb2.ProcessBundleSplitResponse]
+    split_result_list = [
+    ]  # type: List[beam_fn_api_pb2.ProcessBundleSplitResponse]
+
+    def execute(part_map):
+      # type: (...) -> BundleProcessResult
+      bundle_manager = BundleManager(
+          self._worker_handler_list,
+          self._get_buffer,
+          self._get_input_coder_impl,
+          self._bundle_descriptor,
+          self._progress_frequency,
+          self._registered,
+          cache_token_generator=self._cache_token_generator)
+      return bundle_manager.process_bundle(part_map, expected_outputs)
+
     with UnboundedThreadPoolExecutor() as executor:
-      for result, split_result in executor.map(lambda part: BundleManager(
-          self._worker_handler_list, self._get_buffer,
-          self._get_input_coder_impl, self._bundle_descriptor,
-          self._progress_frequency, self._registered,
-          cache_token_generator=self._cache_token_generator).process_bundle(
-              part, expected_outputs), part_inputs):
+      for result, split_result in executor.map(execute, part_inputs):
 
         split_result_list += split_result
         if merged_result is None:
@@ -2062,6 +2346,7 @@ class ParallelBundleManager(BundleManager):
                           result.process_bundle.monitoring_infos,
                           merged_result.process_bundle.monitoring_infos))),
               error=result.error or merged_result.error)
+    assert merged_result is not None
 
     return merged_result, split_result_list
 
@@ -2101,8 +2386,8 @@ class ProgressRequester(threading.Thread):
       try:
         progress_result = self._worker_handler.control_conn.push(
             beam_fn_api_pb2.InstructionRequest(
-                process_bundle_progress=
-                beam_fn_api_pb2.ProcessBundleProgressRequest(
+                process_bundle_progress=beam_fn_api_pb2.
+                ProcessBundleProgressRequest(
                     instruction_id=self._instruction_id))).get()
         self._latest_progress = progress_result.process_bundle_progress
         if self._callback:
@@ -2161,24 +2446,30 @@ class FnApiMetrics(metric.MetricResults):
       self._gauges.update(gauges)
 
   def query(self, filter=None):
-    counters = [MetricResult(k, v, v)
-                for k, v in self._counters.items()
-                if self.matches(filter, k)]
-    distributions = [MetricResult(k, v, v)
-                     for k, v in self._distributions.items()
-                     if self.matches(filter, k)]
-    gauges = [MetricResult(k, v, v)
-              for k, v in self._gauges.items()
-              if self.matches(filter, k)]
+    counters = [
+        MetricResult(k, v, v) for k,
+        v in self._counters.items() if self.matches(filter, k)
+    ]
+    distributions = [
+        MetricResult(k, v, v) for k,
+        v in self._distributions.items() if self.matches(filter, k)
+    ]
+    gauges = [
+        MetricResult(k, v, v) for k,
+        v in self._gauges.items() if self.matches(filter, k)
+    ]
 
-    return {self.COUNTERS: counters,
-            self.DISTRIBUTIONS: distributions,
-            self.GAUGES: gauges}
+    return {
+        self.COUNTERS: counters,
+        self.DISTRIBUTIONS: distributions,
+        self.GAUGES: gauges
+    }
 
   def monitoring_infos(self):
     # type: () -> List[metrics_pb2.MonitoringInfo]
-    return [item for sublist in self._monitoring_infos.values() for item in
-            sublist]
+    return [
+        item for sublist in self._monitoring_infos.values() for item in sublist
+    ]
 
 
 class RunnerResult(runner.PipelineResult):

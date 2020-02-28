@@ -19,6 +19,8 @@
 
 For internal use only; no backwards-compatibility guarantees.
 """
+# pytype: skip-file
+
 from __future__ import absolute_import
 
 from abc import ABCMeta
@@ -28,7 +30,6 @@ from functools import total_ordering
 
 from future.utils import with_metaclass
 
-import apache_beam as beam
 from apache_beam import coders
 from apache_beam import pvalue
 from apache_beam.portability import common_urns
@@ -46,13 +47,12 @@ __all__ = [
     'WatermarkEvent',
     'ProcessingTimeEvent',
     'TestStream',
-    ]
+]
 
 
 @total_ordering
 class Event(with_metaclass(ABCMeta, object)):  # type: ignore[misc]
   """Test stream event to be emitted during execution of a TestStream."""
-
   @abstractmethod
   def __eq__(self, other):
     raise NotImplementedError
@@ -76,17 +76,25 @@ class Event(with_metaclass(ABCMeta, object)):  # type: ignore[misc]
   @staticmethod
   def from_runner_api(proto, element_coder):
     if proto.HasField('element_event'):
-      return ElementEvent(
-          [TimestampedValue(
+      event = proto.element_event
+      tag = None if event.tag == 'None' else event.tag
+      return ElementEvent([
+          TimestampedValue(
               element_coder.decode(tv.encoded_element),
               timestamp.Timestamp(micros=1000 * tv.timestamp))
-           for tv in proto.element_event.elements])
+          for tv in proto.element_event.elements
+      ], tag=tag) # yapf: disable
     elif proto.HasField('watermark_event'):
-      return WatermarkEvent(timestamp.Timestamp(
-          micros=1000 * proto.watermark_event.new_watermark))
+      event = proto.watermark_event
+      tag = None if event.tag == 'None' else event.tag
+      return WatermarkEvent(
+          timestamp.Timestamp(
+              micros=1000 * proto.watermark_event.new_watermark),
+          tag=tag)
     elif proto.HasField('processing_time_event'):
-      return ProcessingTimeEvent(timestamp.Duration(
-          micros=1000 * proto.processing_time_event.advance_duration))
+      return ProcessingTimeEvent(
+          timestamp.Duration(
+              micros=1000 * proto.processing_time_event.advance_duration))
     else:
       raise ValueError(
           'Unknown TestStream Event type: %s' % proto.WhichOneof('event'))
@@ -94,14 +102,14 @@ class Event(with_metaclass(ABCMeta, object)):  # type: ignore[misc]
 
 class ElementEvent(Event):
   """Element-producing test stream event."""
-
   def __init__(self, timestamped_values, tag=None):
     self.timestamped_values = timestamped_values
     self.tag = tag
 
   def __eq__(self, other):
-    return (self.timestamped_values == other.timestamped_values and
-            self.tag == other.tag)
+    return (
+        self.timestamped_values == other.timestamped_values and
+        self.tag == other.tag)
 
   def __hash__(self):
     return hash(self.timestamped_values)
@@ -110,18 +118,20 @@ class ElementEvent(Event):
     return self.timestamped_values < other.timestamped_values
 
   def to_runner_api(self, element_coder):
+    tag = 'None' if self.tag is None else self.tag
     return beam_runner_api_pb2.TestStreamPayload.Event(
         element_event=beam_runner_api_pb2.TestStreamPayload.Event.AddElements(
             elements=[
                 beam_runner_api_pb2.TestStreamPayload.TimestampedElement(
                     encoded_element=element_coder.encode(tv.value),
                     timestamp=tv.timestamp.micros // 1000)
-                for tv in self.timestamped_values]))
+                for tv in self.timestamped_values
+            ],
+            tag=tag))
 
 
 class WatermarkEvent(Event):
   """Watermark-advancing test stream event."""
-
   def __init__(self, new_watermark, tag=None):
     self.new_watermark = timestamp.Timestamp.of(new_watermark)
     self.tag = tag
@@ -130,20 +140,25 @@ class WatermarkEvent(Event):
     return self.new_watermark == other.new_watermark and self.tag == other.tag
 
   def __hash__(self):
-    return hash(self.new_watermark)
+    return hash(str(self.new_watermark) + str(self.tag))
 
   def __lt__(self, other):
     return self.new_watermark < other.new_watermark
 
   def to_runner_api(self, unused_element_coder):
+    tag = 'None' if self.tag is None else self.tag
+
+    # Assert that no prevision is lost.
+    assert 1000 * (
+        self.new_watermark.micros // 1000) == self.new_watermark.micros
     return beam_runner_api_pb2.TestStreamPayload.Event(
-        watermark_event
-        =beam_runner_api_pb2.TestStreamPayload.Event.AdvanceWatermark(
-            new_watermark=self.new_watermark.micros // 1000))
+        watermark_event=beam_runner_api_pb2.TestStreamPayload.Event.
+        AdvanceWatermark(
+            new_watermark=self.new_watermark.micros // 1000, tag=tag))
+
 
 class ProcessingTimeEvent(Event):
   """Processing time-advancing test stream event."""
-
   def __init__(self, advance_by):
     self.advance_by = timestamp.Duration.of(advance_by)
 
@@ -158,9 +173,8 @@ class ProcessingTimeEvent(Event):
 
   def to_runner_api(self, unused_element_coder):
     return beam_runner_api_pb2.TestStreamPayload.Event(
-        processing_time_event
-        =beam_runner_api_pb2.TestStreamPayload.Event.AdvanceProcessingTime(
-            advance_duration=self.advance_by.micros // 1000))
+        processing_time_event=beam_runner_api_pb2.TestStreamPayload.Event.
+        AdvanceProcessingTime(advance_duration=self.advance_by.micros // 1000))
 
 
 class TestStream(PTransform):
@@ -169,49 +183,54 @@ class TestStream(PTransform):
   Each event emits elements, advances the watermark or advances the processing
   time. After all of the specified elements are emitted, ceases to produce
   output.
-  """
 
-  def __init__(self, coder=coders.FastPrimitivesCoder(), events=()):
+  To use the multi-output functionality pelase use the
+  'passthrough_pcollection_output_ids' flag. See BEAM-9322 for more info.
+
+  To add flag::
+
+    from apache_beam.options.pipeline_options import DebugOptions
+    options = ...
+    options.view_as(DebugOptions).add_experiment(
+        'passthrough_pcollection_output_ids')
+
+  """
+  def __init__(
+      self, coder=coders.FastPrimitivesCoder(), events=None, output_tags=None):
     super(TestStream, self).__init__()
     assert coder is not None
+
     self.coder = coder
     self.watermarks = {None: timestamp.MIN_TIMESTAMP}
-    self._events = list(events)
-    self.output_tags = set()
+    self._events = [] if events is None else list(events)
+    self.output_tags = set(output_tags) if output_tags else set()
+
+    event_tags = set(
+        e.tag for e in self._events
+        if isinstance(e, (WatermarkEvent, ElementEvent)))
+    assert event_tags.issubset(self.output_tags), \
+        '{} is not a subset of {}'.format(event_tags, output_tags)
 
   def get_windowing(self, unused_inputs):
     return core.Windowing(window.GlobalWindows())
 
+  def _infer_output_coder(self, input_type=None, input_coder=None):
+    return self.coder
+
   def expand(self, pbegin):
     assert isinstance(pbegin, pvalue.PBegin)
     self.pipeline = pbegin.pipeline
+    if not self.output_tags:
+      self.output_tags = set([None])
 
-    # This multiplexing the  multiple output PCollections.
-    def mux(event):
-      if event.tag:
-        yield pvalue.TaggedOutput(event.tag, event)
-      else:
-        yield event
-    mux_output = (pbegin
-                  | _TestStream(self.output_tags, events=self._events)
-                  | 'TestStream Multiplexer' >> beam.ParDo(mux).with_outputs())
-
-    # Apply a way to control the watermark per output. It is necessary to
-    # have an individual _WatermarkController per PCollection because the
-    # calculation of the input watermark of a transform is based on the event
-    # timestamp of the elements flowing through it. Meaning, it is impossible
-    # to control the output watermarks of the individual PCollections solely
-    # on the event timestamps.
-    outputs = {}
-    for tag in self.output_tags:
-      label = '_WatermarkController[{}]'.format(tag)
-      outputs[tag] = (mux_output[tag] | label >> _WatermarkController())
-
-    # Downstream consumers expect a PCollection if there is only a single
-    # output.
-    if len(outputs) == 1:
-      return list(outputs.values())[0]
-    return outputs
+    # For backwards compatibility return a single PCollection.
+    if len(self.output_tags) == 1:
+      return pvalue.PCollection(
+          self.pipeline, is_bounded=False, tag=list(self.output_tags)[0])
+    return {
+        tag: pvalue.PCollection(self.pipeline, is_bounded=False, tag=tag)
+        for tag in self.output_tags
+    }
 
   def _add(self, event):
     if isinstance(event, ElementEvent):
@@ -295,149 +314,15 @@ class TestStream(PTransform):
             coder_id=context.coders.get_id(self.coder),
             events=[e.to_runner_api(self.coder) for e in self._events]))
 
+  @staticmethod
   @PTransform.register_urn(
       common_urns.primitives.TEST_STREAM.urn,
       beam_runner_api_pb2.TestStreamPayload)
-  def from_runner_api_parameter(payload, context):
+  def from_runner_api_parameter(ptransform, payload, context):
     coder = context.coders.get_by_id(payload.coder_id)
+    output_tags = set(
+        None if k == 'None' else k for k in ptransform.outputs.keys())
     return TestStream(
         coder=coder,
-        events=[Event.from_runner_api(e, coder) for e in payload.events])
-
-
-class _WatermarkController(PTransform):
-  """A runner-overridable PTransform Primitive to control the watermark.
-
-  Expected implementation behavior:
-   - If the instance recieves a WatermarkEvent, it sets its output watermark to
-     the specified value then drops the event.
-   - If the instance receives an ElementEvent, it emits all specified elements
-     to the Global Window with the event time set to the element's timestamp.
-  """
-  def get_windowing(self, _):
-    return core.Windowing(window.GlobalWindows())
-
-  def expand(self, pcoll):
-    return pvalue.PCollection.from_(pcoll)
-
-
-class _TestStream(PTransform):
-  """Test stream that generates events on an unbounded PCollection of elements.
-
-  Each event emits elements, advances the watermark or advances the processing
-  time.  After all of the specified elements are emitted, ceases to produce
-  output.
-
-  Expected implementation behavior:
-   - If the instance receives a WatermarkEvent with the WATERMARK_CONTROL_TAG
-     then the instance sets its own watermark hold at the specified value and
-     drops the event.
-   - If the instance receives any other WatermarkEvent or ElementEvent, it
-     passes it to the consumer.
-  """
-
-  # This tag is used on WatermarkEvents to control the watermark at the root
-  # TestStream.
-  WATERMARK_CONTROL_TAG = '_TestStream_Watermark'
-
-  def __init__(self, output_tags, coder=coders.FastPrimitivesCoder(),
-               events=None):
-    assert coder is not None
-    self.coder = coder
-    self._events = self._add_watermark_advancements(output_tags, events)
-
-  def _watermark_starts(self, output_tags):
-    """Sentinel values to hold the watermark of outputs to -inf.
-
-    The output watermarks of the output PCollections (fake unbounded sources) in
-    a TestStream are controlled by watermark holds. This sets the hold of each
-    output PCollection so that the individual holds can be controlled by the
-    given events.
-    """
-    return [WatermarkEvent(timestamp.MIN_TIMESTAMP, tag) for tag in output_tags]
-
-  def _watermark_stops(self, output_tags):
-    """Sentinel values to close the watermark of outputs."""
-    return [WatermarkEvent(timestamp.MAX_TIMESTAMP, tag) for tag in output_tags]
-
-  def _test_stream_start(self):
-    """Sentinel value to move the watermark hold of the TestStream to +inf.
-
-    This sets a hold to +inf such that the individual holds of the output
-    PCollections are allowed to modify their individial output watermarks with
-    their holds. This is because the calculation of the output watermark is a
-    min over all input watermarks.
-    """
-    return [WatermarkEvent(timestamp.MAX_TIMESTAMP - timestamp.TIME_GRANULARITY,
-                           _TestStream.WATERMARK_CONTROL_TAG)]
-
-  def _test_stream_stop(self):
-    """Sentinel value to close the watermark of the TestStream."""
-    return [WatermarkEvent(timestamp.MAX_TIMESTAMP,
-                           _TestStream.WATERMARK_CONTROL_TAG)]
-
-  def _test_stream_init(self):
-    """Sentinel value to hold the watermark of the TestStream to -inf.
-
-    This sets a hold to ensure that the output watermarks of the output
-    PCollections do not advance to +inf before their watermark holds are set.
-    """
-    return [WatermarkEvent(timestamp.MIN_TIMESTAMP,
-                           _TestStream.WATERMARK_CONTROL_TAG)]
-
-  def _set_up(self, output_tags):
-    return (self._test_stream_init()
-            + self._watermark_starts(output_tags)
-            + self._test_stream_start())
-
-  def _tear_down(self, output_tags):
-    return self._watermark_stops(output_tags) + self._test_stream_stop()
-
-  def _add_watermark_advancements(self, output_tags, events):
-    """Adds watermark advancements to the given events.
-
-    The following watermark advancements can be done on the runner side.
-    However, it makes the logic on the runner side much more complicated than
-    it needs to be.
-
-    In order for watermarks to be properly advanced in a TestStream, a specific
-    sequence of watermark holds must be sent:
-
-    1. Hold the root watermark at -inf (this prevents the pipeline from
-       immediately returning).
-    2. Hold the watermarks at the WatermarkControllerss at -inf (this prevents
-       the pipeline from immediately returning).
-    3. Advance the root watermark to +inf - 1 (this allows the downstream
-       WatermarkControllers to control their watermarks via holds).
-    4. Advance watermarks as normal.
-    5. Advance WatermarkController watermarks to +inf
-    6. Advance root watermark to +inf.
-    """
-    if not events:
-      return []
-
-    return self._set_up(output_tags) + events + self._tear_down(output_tags)
-
-  def get_windowing(self, unused_inputs):
-    return core.Windowing(window.GlobalWindows())
-
-  def expand(self, pcoll):
-    return pvalue.PCollection(pcoll.pipeline, is_bounded=False)
-
-  def _infer_output_coder(self, input_type=None, input_coder=None):
-    return self.coder
-
-  def _events_from_script(self, index):
-    yield self._events[index]
-
-  def events(self, index):
-    return self._events_from_script(index)
-
-  def begin(self):
-    return 0
-
-  def end(self, index):
-    return index >= len(self._events)
-
-  def next(self, index):
-    return index + 1
+        events=[Event.from_runner_api(e, coder) for e in payload.events],
+        output_tags=output_tags)

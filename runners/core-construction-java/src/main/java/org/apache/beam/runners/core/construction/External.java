@@ -21,6 +21,7 @@ import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Prec
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
@@ -28,6 +29,9 @@ import org.apache.beam.model.expansion.v1.ExpansionApi;
 import org.apache.beam.model.pipeline.v1.Endpoints;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.annotations.Experimental;
+import org.apache.beam.sdk.annotations.Experimental.Kind;
+import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.Impulse;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -38,8 +42,8 @@ import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.grpc.v1p21p0.io.grpc.ManagedChannelBuilder;
+import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p26p0.io.grpc.ManagedChannelBuilder;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
@@ -53,6 +57,7 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterable
  * service. Note that this is a low-level API and mainly for internal use. A user may want to use
  * high-level wrapper classes rather than this one.
  */
+@Experimental(Kind.PORTABILITY)
 public class External {
   private static final String EXPANDED_TRANSFORM_BASE_NAME = "external";
   private static final String IMPULSE_PREFIX = "IMPULSE";
@@ -66,16 +71,17 @@ public class External {
     return namespaceCounter.getAndIncrement();
   }
 
-  public static <OutputT> SingleOutputExpandableTransform<OutputT> of(
-      String urn, byte[] payload, String endpoint) {
+  public static <InputT extends PInput, OutputT>
+      SingleOutputExpandableTransform<InputT, OutputT> of(
+          String urn, byte[] payload, String endpoint) {
     Endpoints.ApiServiceDescriptor apiDesc =
         Endpoints.ApiServiceDescriptor.newBuilder().setUrl(endpoint).build();
     return new SingleOutputExpandableTransform<>(urn, payload, apiDesc, getFreshNamespaceIndex());
   }
 
   /** Expandable transform for output type of PCollection. */
-  public static class SingleOutputExpandableTransform<OutputT>
-      extends ExpandableTransform<PCollection<OutputT>> {
+  public static class SingleOutputExpandableTransform<InputT extends PInput, OutputT>
+      extends ExpandableTransform<InputT, PCollection<OutputT>> {
     SingleOutputExpandableTransform(
         String urn,
         byte[] payload,
@@ -90,14 +96,20 @@ public class External {
       return Iterables.getOnlyElement(output.values());
     }
 
-    public MultiOutputExpandableTransform withMultiOutputs() {
-      return new MultiOutputExpandableTransform(
+    public MultiOutputExpandableTransform<InputT> withMultiOutputs() {
+      return new MultiOutputExpandableTransform<>(
+          getUrn(), getPayload(), getEndpoint(), getNamespaceIndex());
+    }
+
+    public <T> SingleOutputExpandableTransform<InputT, T> withOutputType() {
+      return new SingleOutputExpandableTransform<>(
           getUrn(), getPayload(), getEndpoint(), getNamespaceIndex());
     }
   }
 
   /** Expandable transform for output type of PCollectionTuple. */
-  public static class MultiOutputExpandableTransform extends ExpandableTransform<PCollectionTuple> {
+  public static class MultiOutputExpandableTransform<InputT extends PInput>
+      extends ExpandableTransform<InputT, PCollectionTuple> {
     MultiOutputExpandableTransform(
         String urn,
         byte[] payload,
@@ -119,8 +131,8 @@ public class External {
   }
 
   /** Base Expandable Transform which calls ExpansionService to expand itself. */
-  public abstract static class ExpandableTransform<OutputT extends POutput>
-      extends PTransform<PInput, OutputT> {
+  public abstract static class ExpandableTransform<InputT extends PInput, OutputT extends POutput>
+      extends PTransform<InputT, OutputT> {
     private final String urn;
     private final byte[] payload;
     private final Endpoints.ApiServiceDescriptor endpoint;
@@ -129,6 +141,7 @@ public class External {
     @Nullable private transient RunnerApi.Components expandedComponents;
     @Nullable private transient RunnerApi.PTransform expandedTransform;
     @Nullable private transient Map<PCollection, String> externalPCollectionIdMap;
+    @Nullable private transient Map<Coder, String> externalCoderIdMap;
 
     ExpandableTransform(
         String urn,
@@ -142,7 +155,7 @@ public class External {
     }
 
     @Override
-    public OutputT expand(PInput input) {
+    public OutputT expand(InputT input) {
       Pipeline p = input.getPipeline();
       SdkComponents components = SdkComponents.create(p.getOptions());
       RunnerApi.PTransform.Builder ptransformBuilder =
@@ -197,6 +210,7 @@ public class External {
 
       RehydratedComponents rehydratedComponents =
           RehydratedComponents.forComponents(expandedComponents).withPipeline(p);
+
       ImmutableMap.Builder<TupleTag<?>, PCollection> outputMapBuilder = ImmutableMap.builder();
       expandedTransform
           .getOutputsMap()
@@ -211,6 +225,20 @@ public class External {
                 }
               });
       externalPCollectionIdMap = externalPCollectionIdMapBuilder.build();
+
+      Map<Coder, String> externalCoderIdMapBuilder = new HashMap<>();
+      expandedComponents
+          .getPcollectionsMap()
+          .forEach(
+              (pcolId, pCol) -> {
+                try {
+                  Coder coder = rehydratedComponents.getCoder(pCol.getCoderId());
+                  externalCoderIdMapBuilder.putIfAbsent(coder, pCol.getCoderId());
+                } catch (IOException e) {
+                  throw new RuntimeException("cannot rehydrate Coder.");
+                }
+              });
+      externalCoderIdMap = ImmutableMap.copyOf(externalCoderIdMapBuilder);
 
       return toOutputCollection(outputMapBuilder.build());
     }
@@ -235,6 +263,10 @@ public class External {
 
     Map<PCollection, String> getExternalPCollectionIdMap() {
       return externalPCollectionIdMap;
+    }
+
+    Map<Coder, String> getExternalCoderIdMap() {
+      return externalCoderIdMap;
     }
 
     String getUrn() {

@@ -103,7 +103,7 @@ public class TypeUtils {
 
         return TypeFactory.createStructType(structFields);
       default:
-        throw new RuntimeException("Unsupported RelDataType: " + calciteType);
+        throw new UnsupportedOperationException("Unsupported RelDataType: " + calciteType);
     }
   }
 
@@ -128,7 +128,7 @@ public class TypeUtils {
         .createArrayType(toRelDataType(rexBuilder, arrayType.getElementType(), isNullable), -1);
   }
 
-  private static RelDataType toStructRelDataType(
+  public static RelDataType toStructRelDataType(
       RexBuilder rexBuilder, StructType structType, boolean isNullable) {
 
     List<StructField> fields = structType.getFieldList();
@@ -149,7 +149,7 @@ public class TypeUtils {
   public static RelDataType toSimpleRelDataType(
       TypeKind kind, RexBuilder rexBuilder, boolean isNullable) {
     if (!ZETA_TO_CALCITE_SIMPLE_TYPES.containsKey(kind)) {
-      throw new RuntimeException("Unsupported column type: " + kind);
+      throw new UnsupportedOperationException("Unsupported column type: " + kind);
     }
 
     RelDataType relDataType = ZETA_TO_CALCITE_SIMPLE_TYPES.get(kind).apply(rexBuilder);

@@ -126,6 +126,11 @@ case $key in
         shift # past argument
         shift # past value
         ;;
+    --runner_v2)
+        RUNNER_V2="$2"
+        shift # past argument
+        shift # past value
+        ;;
     --kms_key_name)
         KMS_KEY_NAME="$2"
         shift # past argument
@@ -194,8 +199,10 @@ if [[ -z $PIPELINE_OPTS ]]; then
   fi
 
   # Install test dependencies for ValidatesRunner tests.
-  echo "pyhamcrest" > postcommit_requirements.txt
-  echo "mock" >> postcommit_requirements.txt
+  # pyhamcrest==1.10.0 doesn't work on Py2.
+  # See: https://github.com/hamcrest/PyHamcrest/issues/131.
+  echo "pyhamcrest!=1.10.0,<2.0.0" > postcommit_requirements.txt
+  echo "mock<3.0.0" >> postcommit_requirements.txt
 
   # Options used to run testing pipeline on Cloud Dataflow Service. Also used for
   # running on DirectRunner (some options ignored).
@@ -219,6 +226,12 @@ if [[ -z $PIPELINE_OPTS ]]; then
   # Add --dataflow_worker_jar if provided
   if [[ ! -z "$WORKER_JAR" ]]; then
     opts+=("--dataflow_worker_jar=$WORKER_JAR")
+  fi
+
+  # Add --runner_v2 if provided
+  if [[ "$RUNNER_V2" = true ]]; then
+    opts+=("--experiments=use_runner_v2")
+    opts+=("--enable_streaming_engine")
   fi
 
   if [[ ! -z "$KMS_KEY_NAME" ]]; then

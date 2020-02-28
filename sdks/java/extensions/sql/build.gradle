@@ -48,7 +48,6 @@ dependencies {
   compile project(path: ":runners:direct-java", configuration: "shadow")
   compile library.java.commons_codec
   compile library.java.commons_csv
-  compile library.java.commons_lang3
   compile library.java.jackson_databind
   compile library.java.joda_time
   compile library.java.vendored_calcite_1_20_0
@@ -59,6 +58,8 @@ dependencies {
   provided project(":sdks:java:io:google-cloud-platform")
   compile project(":sdks:java:io:mongodb")
   provided project(":sdks:java:io:parquet")
+  provided library.java.jackson_dataformat_xml
+  provided library.java.hadoop_client
   provided library.java.kafka_clients
   testCompile library.java.vendored_calcite_1_20_0
   testCompile library.java.vendored_guava_26_0_jre

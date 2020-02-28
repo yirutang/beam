@@ -71,7 +71,7 @@ import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Splitter;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
@@ -106,6 +106,9 @@ public class CommonCoderTest {
           .put(
               getUrn(StandardCoders.Enum.WINDOWED_VALUE),
               WindowedValue.FullWindowedValueCoder.class)
+          .put(
+              getUrn(StandardCoders.Enum.PARAM_WINDOWED_VALUE),
+              WindowedValue.ParamWindowedValueCoder.class)
           .put(getUrn(StandardCoders.Enum.ROW), RowCoder.class)
           .build();
 
@@ -272,7 +275,8 @@ public class CommonCoderTest {
       return convertedElements;
     } else if (s.equals(getUrn(StandardCoders.Enum.GLOBAL_WINDOW))) {
       return GlobalWindow.INSTANCE;
-    } else if (s.equals(getUrn(StandardCoders.Enum.WINDOWED_VALUE))) {
+    } else if (s.equals(getUrn(StandardCoders.Enum.WINDOWED_VALUE))
+        || s.equals(getUrn(StandardCoders.Enum.PARAM_WINDOWED_VALUE))) {
       Map<String, Object> kvMap = (Map<String, Object>) value;
       Coder valueCoder = ((WindowedValue.FullWindowedValueCoder) coder).getValueCoder();
       Coder windowCoder = ((WindowedValue.FullWindowedValueCoder) coder).getWindowCoder();
@@ -436,6 +440,9 @@ public class CommonCoderTest {
       assertEquals(expectedValue, actualValue);
 
     } else if (s.equals(getUrn(StandardCoders.Enum.WINDOWED_VALUE))) {
+      assertEquals(expectedValue, actualValue);
+
+    } else if (s.equals(getUrn(StandardCoders.Enum.PARAM_WINDOWED_VALUE))) {
       assertEquals(expectedValue, actualValue);
 
     } else if (s.equals(getUrn(StandardCoders.Enum.DOUBLE))) {

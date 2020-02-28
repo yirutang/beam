@@ -35,6 +35,7 @@ import java.util.Objects;
 import java.util.stream.Collector;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
+import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.schemas.Factory;
 import org.apache.beam.sdk.schemas.FieldValueGetter;
 import org.apache.beam.sdk.schemas.Schema;
@@ -57,7 +58,7 @@ import org.joda.time.base.AbstractInstant;
  * <p>{@link Schema} contains the names for each field and the coder for the whole record,
  * {see @link Schema#getRowCoder()}.
  */
-@Experimental
+@Experimental(Kind.SCHEMAS)
 public abstract class Row implements Serializable {
   private final Schema schema;
 
@@ -214,9 +215,8 @@ public abstract class Row implements Serializable {
    * schema doesn't match.
    */
   @Nullable
-  @SuppressWarnings("TypeParameterUnusedInFormals")
-  public <T> T getLogicalTypeValue(String fieldName) {
-    return getLogicalTypeValue(getSchema().indexOf(fieldName));
+  public <T> T getLogicalTypeValue(String fieldName, Class<T> clazz) {
+    return getLogicalTypeValue(getSchema().indexOf(fieldName), clazz);
   }
 
   /**
@@ -360,8 +360,7 @@ public abstract class Row implements Serializable {
    * schema doesn't match.
    */
   @Nullable
-  @SuppressWarnings("TypeParameterUnusedInFormals")
-  public <T> T getLogicalTypeValue(int idx) {
+  public <T> T getLogicalTypeValue(int idx, Class<T> clazz) {
     LogicalType logicalType = checkNotNull(getSchema().getField(idx).getType().getLogicalType());
     return (T) logicalType.toInputType(getValue(idx));
   }

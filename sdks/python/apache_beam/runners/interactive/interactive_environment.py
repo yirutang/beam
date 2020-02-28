@@ -22,6 +22,8 @@ Provides interfaces to interact with existing Interactive Beam environment.
 External Interactive Beam users please use interactive_beam module in
 application code or notebook.
 """
+# pytype: skip-file
+
 from __future__ import absolute_import
 
 import atexit
@@ -69,7 +71,6 @@ class InteractiveEnvironment(object):
   also visualize and introspect those PCollections in user code since they have
   handles to the variables.
   """
-
   def __init__(self, cache_manager=None):
     self._cache_manager = cache_manager
     # Register a cleanup routine when kernel is restarted or terminated.
@@ -79,12 +80,30 @@ class InteractiveEnvironment(object):
     self._watching_set = set()
     # Holds variables list of (Dict[str, object]).
     self._watching_dict_list = []
-    # Holds results of pipeline runs as Dict[Pipeline, PipelineResult].
+    # Holds results of main jobs as Dict[Pipeline, PipelineResult].
     # Each key is a pipeline instance defined by the end user. The
     # InteractiveRunner is responsible for populating this dictionary
     # implicitly.
-    self._pipeline_results = {}
+    self._main_pipeline_results = {}
+    # Holds background caching jobs as Dict[Pipeline, BackgroundCachingJob].
+    # Each key is a pipeline instance defined by the end user. The
+    # InteractiveRunner or its enclosing scope is responsible for populating
+    # this dictionary implicitly when a background caching jobs is started.
+    self._background_caching_jobs = {}
+    # Holds TestStreamServiceControllers that controls gRPC servers serving
+    # events as test stream of TestStreamPayload.Event.
+    # Dict[Pipeline, TestStreamServiceController]. Each key is a pipeline
+    # instance defined by the end user. The InteractiveRunner or its enclosing
+    # scope is responsible for populating this dictionary implicitly when a new
+    # controller is created to start a new gRPC server. The server stays alive
+    # until a new background caching job is started thus invalidating everything
+    # the gRPC server serves.
+    self._test_stream_service_controllers = {}
+    self._cached_source_signature = {}
     self._tracked_user_pipelines = set()
+    # Tracks the computation completeness of PCollections. PCollections tracked
+    # here don't need to be re-computed when data introspection is needed.
+    self._computed_pcolls = set()
     # Always watch __main__ module.
     self.watch('__main__')
     # Do a warning level logging if current python version is below 3.6.
@@ -102,20 +121,34 @@ class InteractiveEnvironment(object):
       self._is_interactive_ready = True
     except ImportError:
       self._is_interactive_ready = False
-      _LOGGER.warning('Dependencies required for Interactive Beam PCollection '
-                      'visualization are not available, please use: `pip '
-                      'install apache-beam[interactive]` to install necessary '
-                      'dependencies to enable all data visualization features.')
+      _LOGGER.warning(
+          'Dependencies required for Interactive Beam PCollection '
+          'visualization are not available, please use: `pip '
+          'install apache-beam[interactive]` to install necessary '
+          'dependencies to enable all data visualization features.')
 
     self._is_in_ipython = is_in_ipython()
     self._is_in_notebook = is_in_notebook()
     if not self._is_in_ipython:
-      _LOGGER.warning('You cannot use Interactive Beam features when you are '
-                      'not in an interactive environment such as a Jupyter '
-                      'notebook or ipython terminal.')
+      _LOGGER.warning(
+          'You cannot use Interactive Beam features when you are '
+          'not in an interactive environment such as a Jupyter '
+          'notebook or ipython terminal.')
     if self._is_in_ipython and not self._is_in_notebook:
-      _LOGGER.warning('You have limited Interactive Beam features since your '
-                      'ipython kernel is not connected any notebook frontend.')
+      _LOGGER.warning(
+          'You have limited Interactive Beam features since your '
+          'ipython kernel is not connected any notebook frontend.')
+
+  @property
+  def options(self):
+    """A reference to the global interactive options.
+
+    Provided to avoid import loop or excessive dynamic import. All internal
+    Interactive Beam modules should access interactive_beam.options through
+    this property.
+    """
+    from apache_beam.runners.interactive.interactive_beam import options
+    return options
 
   @property
   def is_py_version_ready(self):
@@ -145,6 +178,8 @@ class InteractiveEnvironment(object):
     # Utilizes cache manager to clean up cache from everywhere.
     if self.cache_manager():
       self.cache_manager().cleanup()
+    self.evict_computed_pcollections()
+    self.evict_cached_source_signature()
 
   def watch(self, watchable):
     """Watches a watchable.
@@ -206,15 +241,49 @@ class InteractiveEnvironment(object):
     assert issubclass(type(result), runner.PipelineResult), (
         'result must be an instance of '
         'apache_beam.runners.runner.PipelineResult or its subclass')
-    self._pipeline_results[pipeline] = result
+    self._main_pipeline_results[pipeline] = result
 
   def evict_pipeline_result(self, pipeline):
     """Evicts the tracking of given pipeline run. Noop if absent."""
-    return self._pipeline_results.pop(pipeline, None)
+    return self._main_pipeline_results.pop(pipeline, None)
 
   def pipeline_result(self, pipeline):
     """Gets the pipeline run result. None if absent."""
-    return self._pipeline_results.get(pipeline, None)
+    return self._main_pipeline_results.get(pipeline, None)
+
+  def set_background_caching_job(self, pipeline, background_caching_job):
+    """Sets the background caching job started from the given pipeline."""
+    assert issubclass(type(pipeline), beam.Pipeline), (
+        'pipeline must be an instance of apache_beam.Pipeline or its subclass')
+    from apache_beam.runners.interactive.background_caching_job import BackgroundCachingJob
+    assert isinstance(background_caching_job, BackgroundCachingJob), (
+        'background_caching job must be an instance of BackgroundCachingJob')
+    self._background_caching_jobs[pipeline] = background_caching_job
+
+  def get_background_caching_job(self, pipeline):
+    """Gets the background caching job started from the given pipeline."""
+    return self._background_caching_jobs.get(pipeline, None)
+
+  def set_test_stream_service_controller(self, pipeline, controller):
+    """Sets the test stream service controller that has started a gRPC server
+    serving the test stream for any job started from the given user-defined
+    pipeline.
+    """
+    self._test_stream_service_controllers[pipeline] = controller
+
+  def get_test_stream_service_controller(self, pipeline):
+    """Gets the test stream service controller that has started a gRPC server
+    serving the test stream for any job started from the given user-defined
+    pipeline.
+    """
+    return self._test_stream_service_controllers.get(pipeline, None)
+
+  def evict_test_stream_service_controller(self, pipeline):
+    """Evicts and pops the test stream service controller that has started a
+    gRPC server serving the test stream for any job started from the given
+    user-defined pipeline.
+    """
+    return self._test_stream_service_controllers.pop(pipeline, None)
 
   def is_terminated(self, pipeline):
     """Queries if the most recent job (by executing the given pipeline) state
@@ -223,6 +292,18 @@ class InteractiveEnvironment(object):
     if result:
       return runner.PipelineState.is_terminal(result.state)
     return True
+
+  def set_cached_source_signature(self, pipeline, signature):
+    self._cached_source_signature[pipeline] = signature
+
+  def get_cached_source_signature(self, pipeline):
+    return self._cached_source_signature.get(pipeline, set())
+
+  def evict_cached_source_signature(self, pipeline=None):
+    if pipeline:
+      self._cached_source_signature.pop(pipeline, None)
+    else:
+      self._cached_source_signature.clear()
 
   def track_user_pipelines(self):
     """Record references to all user-defined pipeline instances watched in
@@ -253,3 +334,23 @@ class InteractiveEnvironment(object):
   @property
   def tracked_user_pipelines(self):
     return self._tracked_user_pipelines
+
+  def mark_pcollection_computed(self, pcolls):
+    """Marks computation completeness for the given pcolls.
+
+    Interactive Beam can use this information to determine if a computation is
+    needed to introspect the data of any given PCollection.
+    """
+    self._computed_pcolls.update(pcoll for pcoll in pcolls)
+
+  def evict_computed_pcollections(self):
+    """Evicts all computed PCollections.
+
+    Interactive Beam will treat none of the PCollections in any given pipeline
+    as completely computed.
+    """
+    self._computed_pcolls = set()
+
+  @property
+  def computed_pcollections(self):
+    return self._computed_pcolls
