@@ -39,6 +39,7 @@ public class StreamingInserts<DestinationT, ElementT>
   private final boolean skipInvalidRows;
   private final boolean ignoreUnknownValues;
   private final boolean ignoreInsertIds;
+  private final boolean useNewApi;
   private final String kmsKey;
   private final Coder<ElementT> elementCoder;
   private final SerializableFunction<ElementT, TableRow> toTableRow;
@@ -58,6 +59,7 @@ public class StreamingInserts<DestinationT, ElementT>
         false,
         false,
         false,
+        false,
         elementCoder,
         toTableRow,
         null);
@@ -73,6 +75,7 @@ public class StreamingInserts<DestinationT, ElementT>
       boolean skipInvalidRows,
       boolean ignoreUnknownValues,
       boolean ignoreInsertIds,
+      boolean useNewApi,
       Coder<ElementT> elementCoder,
       SerializableFunction<ElementT, TableRow> toTableRow,
       String kmsKey) {
@@ -84,6 +87,7 @@ public class StreamingInserts<DestinationT, ElementT>
     this.skipInvalidRows = skipInvalidRows;
     this.ignoreUnknownValues = ignoreUnknownValues;
     this.ignoreInsertIds = ignoreInsertIds;
+    this.useNewApi = useNewApi;
     this.elementCoder = elementCoder;
     this.toTableRow = toTableRow;
     this.kmsKey = kmsKey;
@@ -101,6 +105,7 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
@@ -117,6 +122,7 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
@@ -132,6 +138,7 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
@@ -147,6 +154,7 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
@@ -162,9 +170,26 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
+  }
+
+  StreamingInserts<DestinationT, ElementT> withUseNewApi(boolean useNewApi) {
+    return new StreamingInserts<>(
+            createDisposition,
+            dynamicDestinations,
+            bigQueryServices,
+            retryPolicy,
+            extendedErrorInfo,
+            skipInvalidRows,
+            ignoreUnknownValues,
+            ignoreInsertIds,
+            useNewApi,
+            elementCoder,
+            toTableRow,
+            kmsKey);
   }
 
   StreamingInserts<DestinationT, ElementT> withKmsKey(String kmsKey) {
@@ -177,6 +202,7 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
@@ -192,6 +218,7 @@ public class StreamingInserts<DestinationT, ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow,
         kmsKey);
@@ -214,6 +241,7 @@ public class StreamingInserts<DestinationT, ElementT>
             .withSkipInvalidRows(skipInvalidRows)
             .withIgnoreUnknownValues(ignoreUnknownValues)
             .withIgnoreInsertIds(ignoreInsertIds)
+                .withUseNewApi(useNewApi)
             .withElementCoder(elementCoder)
             .withToTableRow(toTableRow));
   }

@@ -1695,6 +1695,7 @@ public class BigQueryIO {
         .setSkipInvalidRows(false)
         .setIgnoreUnknownValues(false)
         .setIgnoreInsertIds(false)
+                   .setUseNewApi(false)
         .setMaxFilesPerPartition(BatchLoads.DEFAULT_MAX_FILES_PER_PARTITION)
         .setMaxBytesPerPartition(BatchLoads.DEFAULT_MAX_BYTES_PER_PARTITION)
         .setOptimizeWrites(false)
@@ -1748,7 +1749,8 @@ public class BigQueryIO {
        * href="https://cloud.google.com/bigquery/streaming-data-into-bigquery">Streaming Data into
        * BigQuery</a>.
        */
-      STREAMING_INSERTS
+      STREAMING_INSERTS,
+      WRITE_API
     }
 
     @Nullable
@@ -1827,6 +1829,7 @@ public class BigQueryIO {
     abstract Boolean getIgnoreUnknownValues();
 
     abstract Boolean getIgnoreInsertIds();
+    abstract Boolean getUseNewApi();
 
     @Nullable
     abstract String getKmsKey();
@@ -1902,6 +1905,8 @@ public class BigQueryIO {
       abstract Builder<T> setIgnoreUnknownValues(Boolean ignoreUnknownValues);
 
       abstract Builder<T> setIgnoreInsertIds(Boolean ignoreInsertIds);
+
+      abstract Builder<T> setUseNewApi(Boolean useNewApi);
 
       abstract Builder<T> setKmsKey(String kmsKey);
 
@@ -2308,6 +2313,11 @@ public class BigQueryIO {
       return toBuilder().setIgnoreInsertIds(true).build();
     }
 
+    public Write<T> useNewApi() {
+      return toBuilder().setUseNewApi(true).build();
+    }
+
+
     public Write<T> withKmsKey(String kmsKey) {
       return toBuilder().setKmsKey(kmsKey).build();
     }
@@ -2679,6 +2689,7 @@ public class BigQueryIO {
                 .withSkipInvalidRows(getSkipInvalidRows())
                 .withIgnoreUnknownValues(getIgnoreUnknownValues())
                 .withIgnoreInsertIds(getIgnoreInsertIds())
+                    .withUseNewApi(getUseNewApi())
                 .withKmsKey(getKmsKey());
         return input.apply(streamingInserts);
       } else {

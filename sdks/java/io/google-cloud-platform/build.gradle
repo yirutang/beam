@@ -67,6 +67,7 @@ dependencies {
   compile library.java.netty_handler
   compile library.java.netty_tcnative_boringssl_static
   compile library.java.proto_google_cloud_bigquery_storage_v1beta1
+  compile library.java.proto_google_cloud_bigquery_storage_v1alpha2
   compile library.java.proto_google_cloud_bigtable_v2
   compile library.java.proto_google_cloud_datastore_v1
   compile library.java.proto_google_cloud_pubsub_v1

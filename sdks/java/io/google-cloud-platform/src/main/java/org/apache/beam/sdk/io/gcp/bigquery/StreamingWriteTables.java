@@ -54,6 +54,7 @@ public class StreamingWriteTables<ElementT>
   private final boolean skipInvalidRows;
   private final boolean ignoreUnknownValues;
   private final boolean ignoreInsertIds;
+  private final boolean useNewApi;
   private final Coder<ElementT> elementCoder;
   private final SerializableFunction<ElementT, TableRow> toTableRow;
 
@@ -65,6 +66,7 @@ public class StreamingWriteTables<ElementT>
         false, // skipInvalidRows
         false, // ignoreUnknownValues
         false, // ignoreInsertIds
+        false, // useNewApi
         null, // elementCoder
         null); // toTableRow
   }
@@ -76,6 +78,7 @@ public class StreamingWriteTables<ElementT>
       boolean skipInvalidRows,
       boolean ignoreUnknownValues,
       boolean ignoreInsertIds,
+      boolean useNewApi,
       Coder<ElementT> elementCoder,
       SerializableFunction<ElementT, TableRow> toTableRow) {
     this.bigQueryServices = bigQueryServices;
@@ -84,6 +87,7 @@ public class StreamingWriteTables<ElementT>
     this.skipInvalidRows = skipInvalidRows;
     this.ignoreUnknownValues = ignoreUnknownValues;
     this.ignoreInsertIds = ignoreInsertIds;
+    this.useNewApi = useNewApi;
     this.elementCoder = elementCoder;
     this.toTableRow = toTableRow;
   }
@@ -96,6 +100,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -108,6 +113,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -120,6 +126,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -132,6 +139,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -144,6 +152,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -156,8 +165,22 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
+  }
+
+  StreamingWriteTables<ElementT> withUseNewApi(boolean useNewApi) {
+    return new StreamingWriteTables<>(
+            bigQueryServices,
+            retryPolicy,
+            extendedErrorInfo,
+            skipInvalidRows,
+            ignoreUnknownValues,
+            ignoreInsertIds,
+            useNewApi,
+            elementCoder,
+            toTableRow);
   }
 
   StreamingWriteTables<ElementT> withElementCoder(Coder<ElementT> elementCoder) {
@@ -168,6 +191,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -181,6 +205,7 @@ public class StreamingWriteTables<ElementT>
         skipInvalidRows,
         ignoreUnknownValues,
         ignoreInsertIds,
+        useNewApi,
         elementCoder,
         toTableRow);
   }
@@ -264,6 +289,7 @@ public class StreamingWriteTables<ElementT>
                             skipInvalidRows,
                             ignoreUnknownValues,
                             ignoreInsertIds,
+                            useNewApi,
                             toTableRow))
                     .withOutputTags(mainOutputTag, TupleTagList.of(failedInsertsTag)));
     PCollection<T> failedInserts = tuple.get(failedInsertsTag);
