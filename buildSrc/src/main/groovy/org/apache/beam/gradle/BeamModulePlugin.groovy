@@ -1961,7 +1961,8 @@ class BeamModulePlugin implements Plugin<Project> {
       }
 
       def addPortableWordCountTask = { boolean isStreaming, String runner ->
-        project.task('portableWordCount' + (runner.equals("PortableRunner") ? "" : runner) + (isStreaming ? 'Streaming' : 'Batch')) {
+        def taskName = 'portableWordCount' + (runner.equals("PortableRunner") ? "" : runner) + (isStreaming ? 'Streaming' : 'Batch')
+        project.task(taskName) {
           dependsOn = ['installGcpTest']
           mustRunAfter = [
             ':runners:flink:1.10:job-server-container:docker',
@@ -1974,9 +1975,10 @@ class BeamModulePlugin implements Plugin<Project> {
           ]
           doLast {
             // TODO: Figure out GCS credentials and use real GCS input and output.
+            def outputDir = File.createTempDir(taskName, '')
             def options = [
               "--input=/etc/profile",
-              "--output=/tmp/py-wordcount-direct",
+              "--output=${outputDir}/out.txt",
               "--runner=${runner}",
               "--parallelism=2",
               "--shutdown_sources_on_final_watermark",
