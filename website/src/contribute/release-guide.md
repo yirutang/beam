@@ -1173,6 +1173,7 @@ _Note_: -Prepourl and -Pver can be found in the RC vote email sent by Release Ma
     ```
     python -m apache_beam.examples.complete.game.leader_board \
     --project=${YOUR_PROJECT} \
+    --region=${GCE_REGION} \
     --topic projects/${YOUR_PROJECT}/topics/${YOUR_PUBSUB_TOPIC} \
     --dataset ${USER}_test \
     --runner DataflowRunner \
@@ -1202,6 +1203,7 @@ _Note_: -Prepourl and -Pver can be found in the RC vote email sent by Release Ma
     ```
     python -m apache_beam.examples.complete.game.game_stats \
     --project=${YOUR_PROJECT} \
+    --region=${GCE_REGION} \
     --topic projects/${YOUR_PROJECT}/topics/${YOUR_PUBSUB_TOPIC} \
     --dataset ${USER}_test \
     --runner DataflowRunner \
