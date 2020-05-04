@@ -33,8 +33,8 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.common.ElementByteSizeObservableIterable;
 import org.apache.beam.sdk.util.common.ElementByteSizeObservableIterator;
-import org.apache.beam.sdk.util.common.NoSizeEstimationElementByteSizeObservableIterable;
 import org.apache.beam.sdk.util.common.Reiterable;
 import org.apache.beam.sdk.util.common.Reiterator;
 import org.apache.beam.sdk.values.KV;
@@ -157,8 +157,7 @@ class BatchGroupAlsoByWindowViaIteratorsFn<K, V, W extends BoundedWindow>
    * a given window.
    */
   private static class WindowReiterable<V>
-      extends NoSizeEstimationElementByteSizeObservableIterable<V, WindowReiterator<V>>
-      implements Reiterable<V> {
+      extends ElementByteSizeObservableIterable<V, WindowReiterator<V>> implements Reiterable<V> {
     private PeekingReiterator<WindowedValue<V>> baseIterator;
     private BoundedWindow window;
 
