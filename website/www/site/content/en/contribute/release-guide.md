@@ -406,8 +406,7 @@ You can use [mass_comment.py](https://github.com/apache/beam/blob/master/release
   1. Check the build result.
   2. If build failed, scan log will contain all failures.
   3. You should stabilize the release branch until release build succeeded.
-  4. The script will output a set of Jenkins phrases to enter in the created PR.
-
+  
 There are some projects that don't produce the artifacts, e.g. `beam-test-tools`, you may be able to
 ignore failures there.
 
@@ -676,8 +675,8 @@ Verify that files are [present](https://dist.apache.org/repos/dist/dev/beam).
 ./gradlew :sdks:python:container:buildAll -Pdocker-pull-licenses -Pdocker-tag=${RELEASE}_rc{RC_NUM}
 ```
 
-Verify that third party licenses are included by logging in to the images. For Python SDK images, there should be around 80 ~ 100 dependencies. 
-Please note that dependencies for the SDKs with different Python versions vary. 
+Verify that third party licenses are included by logging in to the images. For Python SDK images, there should be around 80 ~ 100 dependencies.
+Please note that dependencies for the SDKs with different Python versions vary.
 Need to verify all Python images by replacing `${ver}` in the following command to `python2.7, python3.5, python3.6, python3.7`.
 
 ```
@@ -699,7 +698,7 @@ done
 ./gradlew :sdks:java:container:docker -Pdocker-pull-licenses -Pdocker-tag=${RELEASE}_rc{RC_NUM}
 ```
 
-Verify that third party licenses are included by logging in to the images. For Java SDK images, there should be around 1400 dependencies. 
+Verify that third party licenses are included by logging in to the images. For Java SDK images, there should be around 1400 dependencies.
 ```
 docker run -it --entrypoint=/bin/bash apache/beam_java_sdk:${RELEASE}_rc{RC_NUM}
 ls -al /opt/apache/beam/third_party_licenses/ | wc -l
@@ -1213,7 +1212,7 @@ _Note_: -Prepourl and -Pver can be found in the RC vote email sent by Release Ma
 
   * Run GameStats with Dataflow Runner
     ```
-    python -m apache_beam.examples.complete.game.game_stats \ 
+    python -m apache_beam.examples.complete.game.game_stats \
     --project=${YOUR_PROJECT} \
     --region=${GCE_REGION} \
     --topic projects/${YOUR_PROJECT}/topics/${YOUR_PUBSUB_TOPIC} \
