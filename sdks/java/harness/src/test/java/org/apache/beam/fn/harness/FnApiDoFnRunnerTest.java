@@ -59,6 +59,7 @@ import org.apache.beam.model.pipeline.v1.MetricsApi.MonitoringInfo;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi.Environment;
 import org.apache.beam.runners.core.construction.CoderTranslation;
+import org.apache.beam.runners.core.construction.CoderTranslation.TranslationContext;
 import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.runners.core.construction.ParDoTranslation;
 import org.apache.beam.runners.core.construction.PipelineTranslation;
@@ -1315,7 +1316,8 @@ public class FnApiDoFnRunnerTest implements Serializable {
         WindowedValue.getFullCoder(
             CoderTranslation.fromProto(
                 pProto.getComponents().getCodersOrThrow(inputPCollection.getCoderId()),
-                rehydratedComponents),
+                rehydratedComponents,
+                TranslationContext.DEFAULT),
             (Coder)
                 CoderTranslation.fromProto(
                     pProto
@@ -1326,7 +1328,8 @@ public class FnApiDoFnRunnerTest implements Serializable {
                                 .getWindowingStrategiesOrThrow(
                                     inputPCollection.getWindowingStrategyId())
                                 .getWindowCoderId()),
-                    rehydratedComponents));
+                    rehydratedComponents,
+                    TranslationContext.DEFAULT));
     String outputPCollectionId = pTransform.getOutputsOrThrow("output");
 
     ImmutableMap<StateKey, ByteString> stateData =
