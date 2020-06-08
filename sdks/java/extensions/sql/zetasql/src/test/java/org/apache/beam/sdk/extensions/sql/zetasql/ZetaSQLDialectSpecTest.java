@@ -4249,7 +4249,7 @@ public class ZetaSQLDialectSpecTest {
   }
 
   @Test
-  @Ignore("")
+  @Ignore("https://jira.apache.org/jira/browse/BEAM-9191")
   public void testCastBytesToString1() {
     String sql = "SELECT CAST(@p0 AS STRING)";
     ImmutableMap<String, Value> params =
@@ -4278,7 +4278,7 @@ public class ZetaSQLDialectSpecTest {
   }
 
   @Test
-  @Ignore("")
+  @Ignore("https://jira.apache.org/jira/browse/BEAM-9191")
   public void testCastBytesToStringFromTable() {
     String sql = "SELECT CAST(bytes_col AS STRING) FROM table_all_types";
     ZetaSQLQueryPlanner zetaSQLQueryPlanner = new ZetaSQLQueryPlanner(config);
