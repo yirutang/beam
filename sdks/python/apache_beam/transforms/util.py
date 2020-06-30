@@ -740,6 +740,7 @@ def WithKeys(pcoll, k):
 
 @experimental()
 @typehints.with_input_types(Tuple[K, V])
+@typehints.with_output_types(Tuple[K, Iterable[V]])
 class GroupIntoBatches(PTransform):
   """PTransform that batches the input into desired batch size. Elements are
   buffered until they are equal to batch size provided in the argument at which
@@ -785,7 +786,9 @@ def _pardo_group_into_batches(batch_size, input_coder):
       count = count_state.read()
       if count >= batch_size:
         batch = [element for element in element_state.read()]
-        yield batch
+        key, _ = batch[0]
+        batch_values = [v for (k, v) in batch]
+        yield (key, batch_values)
         element_state.clear()
         count_state.clear()
 
@@ -796,7 +799,9 @@ def _pardo_group_into_batches(batch_size, input_coder):
         count_state=DoFn.StateParam(COUNT_STATE)):
       batch = [element for element in element_state.read()]
       if batch:
-        yield batch
+        key, _ = batch[0]
+        batch_values = [v for (k, v) in batch]
+        yield (key, batch_values)
         element_state.clear()
         count_state.clear()
 
